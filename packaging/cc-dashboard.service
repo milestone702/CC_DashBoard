@@ -1,0 +1,17 @@
+[Unit]
+Description=CC_DashBoard master (web dashboard + collectors)
+Documentation=https://github.com/cc-dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cc-dashboard -addr :8080 -data /var/lib/cc-dashboard
+Restart=always
+RestartSec=5
+# 面板读写 /var/lib/cc-dashboard（SQLite + 主密钥），日志走 journal
+RuntimeDirectory=cc-dashboard
+StateDirectory=cc-dashboard
+
+[Install]
+WantedBy=multi-user.target

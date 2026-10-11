@@ -1,0 +1,33 @@
+# nfpm 模板：服务端 master deb/rpm
+# build.ps1 替换 {bin}/{arch}/{version}/{unit} 后调用 nfpm
+name: cc-dashboard
+arch: "{arch}"
+platform: linux
+version: "{version}"
+section: net
+priority: optional
+license: MIT
+maintainer: "milestone702 <cc-dashboard@local>"
+description: |
+  CC_DashBoard master: web dashboard, collectors (SSH/API), alerting, SQLite storage
+contents:
+  # 路径用单引号：Windows 反斜杠在双引号 YAML 中是非法转义（T-13 实测修复）
+  - src: '{bin}'
+    dst: /usr/bin/cc-dashboard
+    file_info:
+      mode: 0755
+  # unit 随包分发，postinstall 自动注册并启动
+  - src: '{unit}'
+    dst: /lib/systemd/system/cc-dashboard.service
+    file_info:
+      mode: 0644
+  # 应用图标（hicolor 主题；build.ps1 替换 {icon}）
+  - src: '{icon}'
+    dst: /usr/share/icons/hicolor/256x256/apps/cc-dashboard.png
+    file_info:
+      mode: 0644
+scripts:
+  # nfpm 的 scripts 值为文件路径（build.ps1 替换 {scripts} 为 packaging/nfpm/ 绝对路径）
+  postinstall: '{server_postinst}'
+  preremove: '{server_prererm}'
+  postremove: '{server_postrm}'

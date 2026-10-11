@@ -1,0 +1,80 @@
+# CI 自动构建（测试 + 前端；打 tag 时出全平台产物）
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            server/go.sum
+            agent-go/go.sum
+            tools/mkipk/go.sum
+
+      - name: Server vet + test
+        working-directory: server
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Agent build
+        working-directory: agent-go
+        run: go build ./...
+
+      - name: mkipk test
+        working-directory: tools/mkipk
+        run: go test ./...
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Web build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+  release:
+    # 打 v* tag 时跑 build.ps1（Windows）产出全平台二进制 + ipk/deb/rpm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe 需要完整 tag 历史（版本号注入）
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Build all
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error

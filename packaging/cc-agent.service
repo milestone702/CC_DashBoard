@@ -1,0 +1,17 @@
+[Unit]
+Description=CC_DashBoard monitoring agent
+Documentation=https://github.com/cc-dashboard
+After=network-online.target
+Wants=network-online.target
+# 配置就绪后才启动（包安装即注册，写入 /etc/cc-agent/config.json 后下个周期生效）
+ConditionPathExists=/etc/cc-agent/config.json
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cc-agent --config /etc/cc-agent/config.json
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

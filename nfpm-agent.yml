@@ -1,0 +1,38 @@
+# nfpm 模板：deb/rpm 打包（build.ps1 替换 {bin}/{arch}/{version}/{unit}/{example} 后调用 nfpm）
+# 安装 nfpm: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+name: cc-agent
+arch: "{arch}"
+platform: linux
+version: "{version}"
+section: utils
+priority: optional
+license: MIT
+maintainer: "milestone702 <cc-dashboard@local>"
+description: |
+  CC_DashBoard monitoring agent (push/listen modes)
+contents:
+  # 路径用单引号：Windows 反斜杠在双引号 YAML 中是非法转义（T-13 实测修复）
+  - src: '{bin}'
+    dst: /usr/bin/cc-agent
+    file_info:
+      mode: 0755
+  # systemd unit 随包分发，postinstall 自动注册（开机自启）
+  - src: '{unit}'
+    dst: /lib/systemd/system/cc-agent.service
+    file_info:
+      mode: 0644
+  # 配置模板：复制为 /etc/cc-agent/config.json 并填入 master/token 后服务自动拉起
+  - src: '{example}'
+    dst: /etc/cc-agent/config.example.json
+    file_info:
+      mode: 0644
+  # 应用图标（hicolor 主题；build.ps1 替换 {icon}）
+  - src: '{icon}'
+    dst: /usr/share/icons/hicolor/256x256/apps/cc-agent.png
+    file_info:
+      mode: 0644
+scripts:
+  # nfpm 的 scripts 值为文件路径（build.ps1 替换 {scripts} 为 packaging/nfpm/ 绝对路径）
+  postinstall: '{agent_postinst}'
+  preremove: '{agent_prererm}'
+  postremove: '{agent_postrm}'

@@ -1,0 +1,11 @@
+services:
+  master:
+    build: ..
+    container_name: cc-dashboard-master
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped

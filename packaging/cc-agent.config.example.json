@@ -1,0 +1,7 @@
+{
+  "master": "http://192.168.1.100:8080",
+  "token": "",
+  "interval_sec": 5,
+  "mode": "push",
+  "listen": ":9100"
+}

@@ -1,0 +1,41 @@
+{
+	"FixedFileInfo": {
+		"FileVersion": {
+			"Major": 0,
+			"Minor": 0,
+			"Patch": 0,
+			"Build": 0
+		},
+		"ProductVersion": {
+			"Major": 0,
+			"Minor": 0,
+			"Patch": 0,
+			"Build": 0
+		},
+		"FileFlagsMask": "3f",
+		"FileFlags ": "00",
+		"FileOS": "040004",
+		"FileType": "01",
+		"FileSubType": "00"
+	},
+	"StringFileInfo": {
+		"Comments": "https://github.com/milestone702/CC_DashBoard",
+		"CompanyName": "milestone702",
+		"FileDescription": "CC_DashBoard monitoring agent",
+		"FileVersion": "0.0.0.0",
+		"InternalName": "cc-agent",
+		"LegalCopyright": "© 2026 milestone702 (MIT)",
+		"LegalTrademarks": "",
+		"OriginalFilename": "cc-agent.exe",
+		"PrivateBuild": "",
+		"ProductName": "CC_DashBoard Agent",
+		"ProductVersion": "0.0.0.0",
+		"SpecialBuild": ""
+	},
+	"VarFileInfo": {
+		"Translation": {
+			"LangID": "0409",
+			"CharsetID": "04B0"
+		}
+	}
+}

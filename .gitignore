@@ -1,0 +1,52 @@
+# ===== 依赖 =====
+node_modules/
+
+# ===== 构建产物（全部可由 build.ps1 / vite 重建）=====
+/build/
+/web/node_modules/
+web/dist/
+# embed 前端：内容由 build.ps1 同步，仅提交 .gitkeep 保证空目录可编译（go:embed all:dist）
+server/internal/webui/dist/*
+!server/internal/webui/dist/.gitkeep
+
+# go build 直接产出的二进制
+server/master
+agent-go/agent-go
+*.exe
+*.test
+
+# ===== 打包散落物（正式产物统一在 /build）=====
+*.deb
+*.rpm
+*.ipk
+
+# ===== 运行数据（SQLite + 主密钥 master.key，绝不入库）=====
+/data/
+data-*/
+server/data-*/
+*.db
+*.db-shm
+*.db-wal
+master.key
+
+# ===== Agent 运行配置（含节点 Token，敏感）=====
+cc-agent.config.json
+
+# ===== 临时与备份 =====
+*.log
+*.pid
+.backup/
+TODO.md
+
+# ===== 开发环境 / 编辑器 =====
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.syso
+# MiMoCode 项目目录（引擎运行时依赖 + 未来可能的项目级配置/技能；如需共享 skills 再缩小范围）
+.mimocode/
