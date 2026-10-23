@@ -27,19 +27,19 @@ type Manager struct {
 	engine    *alert.Engine
 	broadcast func(any) // 推送 metrics 消息（由 main 注入 hub.Broadcast）
 
-	mu      sync.Mutex
-	prevCPU map[int64]cpuSample // 节点 → 上次 CPU 时间片（差分计算使用率）
-	prevPerCores map[int64][]cpuSample // 节点 → 每核时间片（/proc/stat 差分）
-	prevNet map[int64]netSample // 节点 → 上次网卡字节计数
-	prevPVE map[int64]pveNetSample   // PVE netin/netout 差分
-	prevESXI map[int64]esxiNetSample   // ESXi 网卡合计累计差分
-	prevESXINic  map[int64]map[string]esxiNetSample // ESXi 单网卡差分
+	mu            sync.Mutex
+	prevCPU       map[int64]cpuSample                // 节点 → 上次 CPU 时间片（差分计算使用率）
+	prevPerCores  map[int64][]cpuSample              // 节点 → 每核时间片（/proc/stat 差分）
+	prevNet       map[int64]netSample                // 节点 → 上次网卡字节计数
+	prevPVE       map[int64]pveNetSample             // PVE netin/netout 差分
+	prevESXI      map[int64]esxiNetSample            // ESXi 网卡合计累计差分
+	prevESXINic   map[int64]map[string]esxiNetSample // ESXi 单网卡差分
 	prevESXINicTS map[int64]time.Time
-	prevESXIDisk map[int64]map[string]esxiDiskSample // ESXi 磁盘累计差分
-	sids    map[int64]synoSID        // 群晖 SID 会话缓存
-	synoNames map[int64]string       // 群晖主机名缓存（server_name 极少变化）
-	clients map[int64]*ssh.Client    // SSH 长连接缓存（复用）
-	pubIPTs map[int64]time.Time       // SSH 节点公网 IP 上次查询时间（10 分钟节流）
+	prevESXIDisk  map[int64]map[string]esxiDiskSample // ESXi 磁盘累计差分
+	sids          map[int64]synoSID                   // 群晖 SID 会话缓存
+	synoNames     map[int64]string                    // 群晖主机名缓存（server_name 极少变化）
+	clients       map[int64]*ssh.Client               // SSH 长连接缓存（复用）
+	pubIPTs       map[int64]time.Time                 // SSH 节点公网 IP 上次查询时间（10 分钟节流）
 
 	// OnLive 回调：缓存实时明细到 API 层（详情接口 REST 兜底读取）
 	OnLive func(nodeID int64, data json.RawMessage)
@@ -59,18 +59,18 @@ type netSample struct {
 func NewManager(db *store.DB, key []byte, engine *alert.Engine, broadcast func(any)) *Manager {
 	return &Manager{
 		db: db, key: key, engine: engine, broadcast: broadcast,
-		prevCPU:  map[int64]cpuSample{},
-		prevPerCores: map[int64][]cpuSample{},
-		prevNet:  map[int64]netSample{},
-		prevPVE:  map[int64]pveNetSample{},
-		prevESXI: map[int64]esxiNetSample{},
-		prevESXINic:  map[int64]map[string]esxiNetSample{},
+		prevCPU:       map[int64]cpuSample{},
+		prevPerCores:  map[int64][]cpuSample{},
+		prevNet:       map[int64]netSample{},
+		prevPVE:       map[int64]pveNetSample{},
+		prevESXI:      map[int64]esxiNetSample{},
+		prevESXINic:   map[int64]map[string]esxiNetSample{},
 		prevESXINicTS: map[int64]time.Time{},
-		prevESXIDisk: map[int64]map[string]esxiDiskSample{},
-		sids:     map[int64]synoSID{},
-		synoNames: map[int64]string{},
-		clients:  map[int64]*ssh.Client{},
-		pubIPTs:  map[int64]time.Time{},
+		prevESXIDisk:  map[int64]map[string]esxiDiskSample{},
+		sids:          map[int64]synoSID{},
+		synoNames:     map[int64]string{},
+		clients:       map[int64]*ssh.Client{},
+		pubIPTs:       map[int64]time.Time{},
 	}
 }
 
@@ -119,12 +119,14 @@ func (m *Manager) poll(n *model.Node, interval int) {
 	creds, err := m.decryptCreds(n)
 	if err != nil {
 		log.Printf("SSH[%s] 凭据解密失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("凭据解密失败: %v", err))
 		return
 	}
 	// 长连接：命中缓存先探活，失效自动重拨；采完不关闭
 	client, err := m.getSSHClient(n, creds)
 	if err != nil {
 		log.Printf("SSH[%s] 连接失败 %s:%d: %v", n.Name, n.Address, sshPort(n), err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("SSH 连接 %s:%d 失败: %v", n.Address, sshPort(n), err))
 		return // 保持 LastSeen 不变 → 超时后由离线巡检判定
 	}
 	// 目标机公网 IP（best-effort，异步不阻塞采集）：SSH 模式无 Agent 上报，由服务端在目标机上查询
@@ -145,6 +147,7 @@ func (m *Manager) poll(n *model.Node, interval int) {
 	}
 	if err != nil {
 		log.Printf("SSH[%s] 采集失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("采集失败: %v", err))
 		return
 	}
 	sample.NodeID = n.ID
@@ -163,10 +166,16 @@ func (m *Manager) poll(n *model.Node, interval int) {
 // ingest 统一入库链路：样本 → 详情/硬件 → 实时 → 状态/告警 → WS 推送。
 // SSH / 拉取 / PVE 三种采集共用。
 func (m *Manager) ingest(n *model.Node, sample *model.MetricsSample, detailJSON, hardwareJSON string, live json.RawMessage) {
+	// 温度：与 Agent 上报路径一致，从 live.temps 提取最高值
+	if sample.TempMax == 0 {
+		sample.TempMax = model.ExtractTempMax(live)
+	}
 	if err := m.db.InsertSample(n.ID, sample); err != nil {
 		log.Printf("[%s] 入库失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("入库失败: %v", err))
 		return
 	}
+	_ = m.db.ClearNodeError(n.ID) // 采集成功：清掉上一次的失败原因
 	if detailJSON != "" && detailJSON != "null" {
 		_ = m.db.SaveNodeDetail(n.ID, detailJSON)
 	}

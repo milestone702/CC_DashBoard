@@ -66,20 +66,24 @@ func (m *Manager) pull(n *model.Node) {
 	resp, err := pullClient.Do(req)
 	if err != nil {
 		log.Printf("PULL[%s] 连接失败 %s: %v", n.Name, url, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("拉取 %s 失败: %v", url, err))
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		log.Printf("PULL[%s] 返回 %d", n.Name, resp.StatusCode)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("Agent 返回 HTTP %d（检查 Token 是否一致）", resp.StatusCode))
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	if err != nil {
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("读取响应失败: %v", err))
 		return
 	}
 	var p pullPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		log.Printf("PULL[%s] 响应解析失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("响应解析失败: %v", err))
 		return
 	}
 	now := time.Now().Unix()

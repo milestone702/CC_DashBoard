@@ -8,40 +8,55 @@ export const useNodesStore = defineStore('nodes', () => {
   const nodes = ref([])
   const summary = ref({ total: 0, online: 0, offline: 0, alerting: 0 })
   const connected = ref(false) // WS 已连接
-  const mockMode = ref(false) // 后端不可用，使用演示数据
+  const mockMode = ref(false) // 演示数据（仅开发构建 + VITE_USE_MOCK=1 时启用）
   const liveById = ref({}) // 节点实时明细快照（WS type=live 推送）
+  const lastError = ref('') // 最近一次加载失败原因（空串=正常）
+  const alertTick = ref(0) // 告警事件计数：WS 收到 alert_firing/alert_resolved 时 +1，供告警页刷新
+
+  // 生产构建永不展示假数据：演示模式必须显式开启
+  const USE_MOCK = import.meta.env.DEV && import.meta.env.VITE_USE_MOCK === '1'
 
   let ws = null
   let retry = 1000
   let stopped = false
+  let reconnectTimer = null // 重连定时器（纳入统一清理，避免 dispose 后仍重连）
   const timers = []
 
+  // 加载失败时保留上一次成功的数据，只记录错误：
+  // 绝不能把「网络抖动/401/500」变成「展示演示数据」，否则用户会误判真实设备状态。
   async function fetchNodes() {
     try {
       const data = await getJSON('/nodes')
       nodes.value = data.nodes || []
       mockMode.value = false
-    } catch {
-      nodes.value = mockNodes
-      mockMode.value = true
+      lastError.value = ''
+    } catch (e) {
+      lastError.value = e.message || '节点列表加载失败'
+      if (USE_MOCK && nodes.value.length === 0) {
+        nodes.value = mockNodes
+        mockMode.value = true
+      }
     }
   }
 
   async function fetchSummary() {
-    if (mockMode.value) {
+    if (USE_MOCK && mockMode.value) {
       summary.value = mockSummary
       return
     }
     try {
       summary.value = await getJSON('/summary')
-    } catch {
-      mockMode.value = true
-      summary.value = mockSummary
+    } catch (e) {
+      lastError.value = lastError.value || e.message || '汇总数据加载失败'
+      if (USE_MOCK && summary.value.total === 0) {
+        summary.value = mockSummary
+        mockMode.value = true
+      }
     }
   }
 
   function connectWS() {
-    if (stopped || mockMode.value || (ws && ws.readyState <= WebSocket.OPEN)) return
+    if (stopped || (USE_MOCK && mockMode.value) || (ws && ws.readyState <= WebSocket.OPEN)) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const sock = new WebSocket(`${proto}://${location.host}/api/v1/ws`)
     ws = sock
@@ -70,6 +85,8 @@ export const useNodesStore = defineStore('nodes', () => {
             n.status = msg.status
             fetchSummary()
           }
+        } else if (msg.type === 'alert_firing' || msg.type === 'alert_resolved') {
+          alertTick.value++ // 告警页 watch 此计数并重新拉取（比轮询及时）
         } else if (msg.type === 'node_added' || msg.type === 'node_removed') {
           fetchNodes()
           fetchSummary()
@@ -80,9 +97,10 @@ export const useNodesStore = defineStore('nodes', () => {
     }
     sock.onclose = () => {
       connected.value = false
-      if (stopped || mockMode.value) return
+      if (stopped || (USE_MOCK && mockMode.value)) return
       retry = Math.min(retry * 2, 30000)
-      setTimeout(connectWS, retry)
+      clearTimeout(reconnectTimer)
+      reconnectTimer = setTimeout(connectWS, retry)
     }
     sock.onerror = () => sock.close()
   }
@@ -109,6 +127,7 @@ export const useNodesStore = defineStore('nodes', () => {
   // 应用启动 / 登录成功后调用：拉数据 + 建 WS + 30 秒兜底轮询（可重复调用，先关旧连接再重建）
   async function init() {
     stopped = true
+    clearTimeout(reconnectTimer) // 取消挂起的重连，避免旧定时器在新连接建立后又开一条
     if (ws) {
       ws.close()
       ws = null
@@ -119,7 +138,7 @@ export const useNodesStore = defineStore('nodes', () => {
     timers.length = 0
     await fetchNodes()
     await fetchSummary()
-    if (mockMode.value) return
+    if (USE_MOCK && mockMode.value) return // 仅演示模式下不建实时通道
     connectWS()
     timers.push(
       setInterval(() => {
@@ -131,6 +150,7 @@ export const useNodesStore = defineStore('nodes', () => {
 
   function dispose() {
     stopped = true
+    clearTimeout(reconnectTimer)
     timers.forEach(clearInterval)
     timers.length = 0
     if (ws) {
@@ -146,6 +166,8 @@ export const useNodesStore = defineStore('nodes', () => {
     connected,
     mockMode,
     liveById,
+    lastError,
+    alertTick,
     init,
     dispose,
     fetchNodes,

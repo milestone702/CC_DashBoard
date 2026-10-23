@@ -121,9 +121,9 @@ func main() {
 	startAgentMode(func(ctx context.Context) {
 		s := &sampler{}
 		_, _, _, _, _ = s.sample() // 首次采集建立差分基线
-		refreshBootEvents()         // 开关机记录首采（last / 事件日志）
-		go startPublicIPLoop()      // 公网 IP 自查（上报兜底）
-		go startOTAFinalize()       // 升级挂起标记：确认或回滚
+		refreshBootEvents()        // 开关机记录首采（last / 事件日志）
+		go startPublicIPLoop()     // 公网 IP 自查（上报兜底）
+		go startOTAFinalize()      // 升级挂起标记：确认或回滚
 
 		// 采样缓存：两种模式共用；push 直接上报，listen 由 /metrics 提供
 		var mu sync.Mutex
@@ -789,6 +789,8 @@ func buildPayload(core, detail, live, hardware map[string]any) ([]byte, error) {
 		"detail": detail, "live": live, "hardware": hardware,
 		// 身份元数据：版本/目标平台（程序池匹配、可升级提示、OTA）
 		"agent_version": version, "agent_goos": runtime.GOOS, "agent_arch": targetArch(),
+		// 自监控：Agent 自身内存占用（字节），用于排查 Agent 是否吃内存
+		"agent_mem": selfMemBytes(),
 	}
 	if ip := getPublicIP(); ip != "" {
 		payload["public_ip"] = ip
@@ -797,6 +799,14 @@ func buildPayload(core, detail, live, hardware map[string]any) ([]byte, error) {
 		payload["boot_events"] = evs
 	}
 	return json.Marshal(payload)
+}
+
+// selfMemBytes 返回 Agent 自身占用的内存（字节，取 Go 运行时的 Sys：向 OS 申请的总量）。
+// 用于面板展示「Agent 自身吃了多少内存」，排查采集端是否成为负担。
+func selfMemBytes() uint64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.Sys
 }
 
 // postPayload POST 指标到 Master（反向模式），返回服务端附带的可选升级指令。

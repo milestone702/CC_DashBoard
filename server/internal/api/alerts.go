@@ -3,6 +3,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -54,15 +55,25 @@ type ruleBody struct {
 	Enabled   *bool    `json:"enabled"`
 }
 
+// metricMax 各指标阈值上限（量纲不同：百分比 / 负载 / Bytes/s）。
+var metricMax = map[string]float64{
+	"cpu":      100,
+	"mem_pct":  100,
+	"disk_pct": 100,
+	"load1":    1000,
+	"net_rx":   1 << 40, // 1 TiB/s，实际够用
+	"net_tx":   1 << 40,
+	"temp":     150, // ℃：普通 CPU 不会超过 120，留足余量
+}
+
 // validate 校验并填充默认值；返回 (metric, op, threshold, delay, enabled, errMsg)。
 func (b *ruleBody) validate() (string, string, float64, int, bool, string) {
-	switch b.Metric {
-	case "cpu", "mem_pct", "disk_pct":
-	default:
-		return "", "", 0, 0, false, "metric: cpu|mem_pct|disk_pct"
+	max, ok := metricMax[b.Metric]
+	if !ok {
+		return "", "", 0, 0, false, "metric: cpu|mem_pct|disk_pct|load1|net_rx|net_tx"
 	}
-	if b.Threshold == nil || *b.Threshold < 0 || *b.Threshold > 100 {
-		return "", "", 0, 0, false, "threshold 0~100 required"
+	if b.Threshold == nil || *b.Threshold < 0 || *b.Threshold > max {
+		return "", "", 0, 0, false, fmt.Sprintf("threshold 0~%g required", max)
 	}
 	op := b.Op
 	if op != ">=" {

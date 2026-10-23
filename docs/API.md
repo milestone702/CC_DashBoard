@@ -1,8 +1,12 @@
 # CC_DashBoard API 对接文档
 
-- 版本：v1.1（对应 `server/` 当前实现；新增程序池 / OTA / 公网 IP / 开关机记录）
+- 版本：v1.3（对应 `server` V0.2.0；补充 gzip 压缩响应的长度与 Range 约定）
 - 适用对象：前端（Vue3）对接、采集端（Agent / 脚本）开发
-- 更新日期：2026-10-11
+- 更新日期：2026-10-23
+
+> **只做 Android / 移动端 App？** 请看两份专用文档：
+> [`APP-DESIGN.md`](./APP-DESIGN.md)（产品需求与技术设计：页面结构、多面板、仪表盘、登录方案）
+> 和 [`APP-API.md`](./APP-API.md)（精简接口参考 + Kotlin 数据模型 + WebSocket 重连策略）。
 
 ---
 
@@ -15,16 +19,27 @@
 | 时间戳 | Unix 秒（`ts` / `last_seen` / `triggered_at` 等） |
 | 字节单位 | 内存/磁盘为字节（`mem_used` 等）；网速为 **Bytes/s**（`net_rx` / `net_tx`） |
 | 错误响应 | `{"message": "..."}` + 对应 HTTP 状态码 |
-| CORS | 已全开放（`Access-Control-Allow-Origin: *`），跨域直连可用 |
+| 传输压缩 | 支持 gzip（带 `Accept-Encoding: gzip` 即压缩，JSON 通常省 80%+、JS 省 60%）；压缩响应不返回 `Content-Length`（按 chunked 传输），带 `Range` 的请求不压缩；OkHttp/浏览器自动处理 |
+| 静态缓存 | `/assets/*`（文件名带内容 hash）返回 `Cache-Control: max-age=31536000, immutable`；入口 HTML 为 `no-cache` |
+| CORS | `Access-Control-Allow-Origin: *` 且放行 `Authorization` 头，跨域直连可用；但**未开放 `Allow-Credentials`**，浏览器跨域请求无法携带会话 Cookie——跨域集成请改用 Bearer API Key |
 | 开发代理 | Vite 已配置 `/api` → `http://127.0.0.1:8080`（含 WebSocket） |
 
-**鉴权（两级会话 + 机器 Token）**
+**鉴权（三种凭证）**
 
-- `POST /report`：机器身份，请求头 `X-CC-Node-Token: <节点Token>`；**未批准（pending）节点返回 403**。
-- 用户身份：Cookie 会话（`cc_session`，HMAC 签名，7 天有效），分 `admin` / `view` 两级：
-  - **后台写操作**（节点增删改、规则、安全设置、install-script）必须 `admin`；
+| 凭证 | 面向 | 携带方式 | 有效期 |
+|---|---|---|---|
+| 会话 Cookie | 浏览器面板 | `Cookie: cc_session=...`（HMAC 签名） | 7 天 |
+| API Key | App / 脚本 / 第三方集成 | `Authorization: Bearer cck_...` | 不过期；**支持多条**，单条吊销互不影响 |
+| 节点 Token | Agent 上报与下载 | `X-CC-Node-Token: <节点Token>` | 不过期，轮换即失效 |
+
+- `POST /report` / `POST /register` / `GET /pool/:id/download`：机器身份，请求头 `X-CC-Node-Token`；**未批准（pending）节点返回 403**。
+- 用户身份分 `admin` / `view` 两级：
+  - **后台写操作**（节点增删改、规则、安全设置、API Key 管理、install-script）必须 `admin`；
   - **前台读操作**（summary/nodes/history/detail/alerts/WS）：默认开放；管理员在后台开启「访问密码」后需 `view` 或 `admin` 会话；
   - 节点列表/详情对非管理员**隐藏 Token**，pending 节点仅管理员可见。
+- **API Key**（见第 11 节）：与用户身份等价，`scope=admin` 可读写、`scope=view` 只读；服务端只存 SHA-256，
+  明文仅在生成/轮换的响应里返回一次。非浏览器客户端无需托管 Cookie，且**不受 CSRF Origin 校验约束**
+  （该凭证由客户端显式设置，浏览器不会自动附带）。两种凭证可同时存在，判定时 API Key 优先。
 - 认证接口见第 11 节；首次使用需先 `POST /auth/setup` 设置管理员密码。
 
 ---
@@ -79,6 +94,8 @@ Agent / 脚本周期上报指标。
 | `agent_goos` / `agent_arch` | string | 可选：目标平台，如 `linux` / `amd64`（ARM 细分为 `armv7` 等，与池产物命名对齐） |
 | `public_ip` | string | 可选：Agent 自查的公网 IP（服务端看到的源 IP 为内网时兜底） |
 | `boot_events` | array | 可选：开关机记录 `[{ts, type:"on"|"off"}]`，服务端按 `(node_id, ts, type)` **插入去重** |
+| `agent_mem` | int | 可选：Agent **自身**内存占用（字节），用于排查采集端吃内存 |
+| `temps`（在 `live` 内） | array | 可选：`[{label, value}]`。服务端自动取最高值写入 `temp_max`，供温度告警与曲线使用 |
 
 > `node_id` 与 `ts` 由服务端按 Token 和接收时间**覆盖**，客户端传入无效。
 
@@ -107,7 +124,7 @@ curl -X POST http://master:8080/api/v1/report \
                  "ifaces":[{"name":"eth0","mac":"aa:bb:..","ipv4":"192.168.1.10"}]}}'
 ```
 
-**错误**：`401` Token 无效；`403` 节点被停用；`400` JSON 非法。
+**错误**：`401` Token 无效；`403` 节点被停用（`enabled=false`）或待批准（`pending approval`）；`400` JSON 非法。
 
 ---
 
@@ -132,7 +149,7 @@ curl -X POST http://master:8080/api/v1/report \
 }
 ```
 
-- `alerts`：最近 20 条 `firing` 告警。
+- `alerts`：最近 20 条 `firing` 告警；**无告警时该字段为 `null`（不是 `[]`）**，前端需判空。
 - `ws_clients`：当前 WebSocket 连接数（观测用）。
 
 ---
@@ -143,6 +160,14 @@ curl -X POST http://master:8080/api/v1/report \
 
 节点列表（含最新指标），首页卡片数据源。
 
+**可选分页**：`?limit=<n>&offset=<m>`。不传时返回全部（与旧版行为一致，响应里也没有 `total` 字段）；
+传 `limit` 后响应附带 `total` / `limit` / `offset`，便于节点很多（200+）时分批加载。
+
+```bash
+curl -s "http://<master>:8080/api/v1/nodes?limit=50&offset=0" -H "Authorization: Bearer $KEY"
+# → {"nodes":[...50 条...],"total":213,"limit":50,"offset":0}
+```
+
 ```json
 {
   "nodes": [
@@ -150,7 +175,8 @@ curl -X POST http://master:8080/api/v1/report \
       "id": 1, "name": "主服务器", "os_type": "linux", "access_mode": "agent",
       "address": "192.168.1.10", "public_ip": "120.236.10.88", "port": 0,
       "token": "86517ce4...",
-      "enabled": true, "report_interval": 5,
+      "enabled": true, "approved": true, "direction": "push",
+      "report_interval": 5, "sort_order": 1,
       "agent_version": "0.1.0", "agent_goos": "linux", "agent_arch": "amd64",
       "upgrade": { "version": "0.2.0", "pool_id": 3 },
       "status": "alert",
@@ -160,7 +186,7 @@ curl -X POST http://master:8080/api/v1/report \
         "cpu": 23.5, "mem_used": 3221225472, "mem_total": 8589934592,
         "disk_pct": 47.2, "net_rx": 1250000, "net_tx": 320000,
         "load1": 0.8, "uptime": 93784,
-    "disk_read": 1500000, "disk_write": 800000, "per_cpu": [12.5, 8.3]
+        "disk_read": 1500000, "disk_write": 800000, "per_cpu": [12.5, 8.3]
       }
     }
   ]
@@ -175,20 +201,31 @@ curl -X POST http://master:8080/api/v1/report \
 | `alert` | 在线但存在 firing 阈值告警 | 红/橙（脉冲动画） |
 | `offline` | 离线（超过 3×上报周期未上报） | 灰色 |
 
-- `latest` 可能为 `null`（节点从未上报）。
+- `latest` 在节点从未上报时**整个字段缺失**（`omitempty`），而不是 `null`。
+- `mem_pct`（内存使用率 %）**由服务端算好下发**（`mem_pct` 字段），前端/App 直接用；`mem_total=0` 时为 0。
 - `mem_pct`（内存使用率 %）由前端计算：`mem_used / mem_total * 100`。
 - `public_ip`：公网 IP（优先取上报连接的源 IP，为内网时取 Agent 上报值），无则空串；地址行按“上内网、下公网”两行展示。**SSH 节点**由服务端在目标机执行查询命令（10 分钟一次，best-effort）；**API 节点**无自动获取，用 `PUT /nodes/:id` 的 `public_ip` 手动设置（管理页节点表「公网IP」按钮）。
 - `agent_version` / `agent_goos` / `agent_arch`：Agent 身份元数据，旧版 Agent 为空串。
+- `approved`：`false` 表示自注册（Join Key）后待批准，**仅管理员可见**；管理员在后台创建的节点默认 `true`。
+- `group_tag`：**分组标签**（自由文本，≤24 字符，空串=未分组）。前端按它分区展示，便于把「家里 / 机房A / 云主机」分开；服务端不做分组校验，纯展示用途。
+- `mute_until`：**告警静默截止时间**（unix 秒，0=未静默）。静默期内告警照常产生并记录，
+  但**不发通知**——用于重启/升级等维护窗口，避免刷屏。
+- `agent_mem`：Agent 自身内存占用（字节，0=未知）。**不是主机内存**，用于判断采集端自身开销。
+- `last_error` / `last_error_at`：**最近一次采集失败的原因**（SSH 连接失败 / DSM 登录失败 / PVE API 报错等）与时间，
+  采集成功后自动清空。用于向用户解释「为什么离线/没有数据」，Agent 模式节点通常为空。
 - `upgrade`：程序池存在匹配的不同版本时出现 `{"version": "...", "pool_id": n}`，否则字段缺省（前端显示“可升级”徽标）。
 
 ### POST /nodes
 
 创建节点，**Token 在响应中返回**。
 
-请求：`{"name":"主服务器","os_type":"linux","access_mode":"agent","address":"192.168.1.10","port":0,"report_interval":5,"enabled":true,"auth_password":"可选，SSH/凭据（AES-256-GCM 加密存储）"}`
+请求：`{"name":"主服务器","os_type":"linux","access_mode":"agent","address":"192.168.1.10","port":0,"report_interval":5,"enabled":true,"direction":"push","group_tag":"机房A"}`
 
 - `name` 必填；`os_type` 默认 `linux`（可选 `linux|windows|nas|openwrt|darwin|pve|esxi`）；
-- `access_mode` 默认 `agent`（可选 `agent|ssh|api`）。
+- `access_mode` 默认 `agent`（可选 `agent|ssh|api`）；`direction` 默认 `push`（可选 `push|pull`）。
+- `group_tag` 可选：分组标签（≤24 字符，空=未分组），仅用于前端分区展示。
+- `access_mode=ssh|api` 时的凭据字段（AES-256-GCM 加密存 `auth_enc`，**任何接口不回传明文**）：
+  `username`、`password`、`private_key`、`node_name`（PVE 节点名），见第 13 / 17 节。
 - 响应：`{"node": {...含 token ...}}`
 
 ### GET /nodes/:id
@@ -201,11 +238,16 @@ curl -X POST http://master:8080/api/v1/report \
 
 ```json
 { "name": "新名字", "address": "10.0.0.2", "enabled": false,
-  "report_interval": 10, "auth_password": "更新凭据",
-  "rotate_token": true }
+  "report_interval": 10, "username": "root", "password": "新密码",
+  "approved": true, "rotate_token": true }
 ```
 
 - `rotate_token: true` 轮换上报 Token（旧 Token 立即失效）。
+- `group_tag: "机房A"` 设置分组（**传空串=取消分组**，不传=保持不变）。
+- `mute_minutes: 60` 开启告警静默 60 分钟（**0=解除**，上限 7 天）。静默期内告警照常记录但不发通知。
+- 凭据字段 `username` / `password` / `private_key` / `node_name`：**不传的字段保持不变**，`password` 传空串 `""` 表示清除。
+- `approved: true|false` 批准 / 撤回自注册（pending）节点。
+- `rotate_host_key: true` 重置 SSH 的 TOFU 主机指纹（见第 13 节）。
 - `public_ip: "1.2.3.4"`（可选）手动指定公网 IP（留空清除）：SSH 模式默认由服务端在目标机上每 10 分钟自动查询；**API 模式（PVE/群晖）无法自动获取**，用此字段手动设置。
 - 响应：`{"node": {...}}`（含最新 token）
 
@@ -251,7 +293,7 @@ curl -X POST http://master:8080/api/v1/report \
 
 - 响应另含 `"live"`（实时明细：`per_cpu` / `mem` 细分 / `nics` / `disk_io` / `temps` / `procs`，服务端内存缓存）
   与 `"hardware"`（硬件清单：`cpu` / `memory` / `board` / `disks` / `nics` / `system`）。
-- `latest` / `live` / `detail` / `hardware` / `events` / `boot_events` / `alerts` 均可能为空（`null` 或 `[]`），前端需做空态。
+- 空值形态（实测）：`latest` / `live` / `detail` / `hardware` / `events` 无数据时是 `null`；`boot_events` / `alerts` 无数据时是 `[]`。
 - `boot_events`：开关机记录（新→旧，最多 50 条；`type`: `on` 开机 / `off` 关机），来源 Agent 上报并按 `(node_id, ts, type)` 去重。
 - `detail` / `hardware` 结构由采集端定义、服务端原样透传，字段以实际为准。
 
@@ -275,6 +317,7 @@ curl -X POST http://master:8080/api/v1/report \
 ```
 
 - `points` 按 `ts` 升序；无数据时为 `[]`（不是 `null`）。
+- `mem_pct` 同样由服务端算好（`mem_pct` 字段），无需前端再除。
 - `disk_read`/`disk_write` 为聚合窗口平均（Bytes/s）；`per_cpu` 为 JSON 数组**文本**（聚合窗口取窗口内首个非空样本），空串=该窗口无每核数据。
 - **CSV 导出**：追加 `&format=csv` 返回 `text/csv`（`Content-Disposition: attachment`），列：`ts,datetime,cpu_pct,mem_used,mem_total,disk_pct,net_rx_bps,net_tx_bps,load1,uptime_sec,disk_read_bps,disk_write_bps,per_cpu`；文件名 `node<id>_<range>.csv`。
 - **错误**：`400` range 非法；`404` 节点不存在。
@@ -290,7 +333,7 @@ curl -X POST http://master:8080/api/v1/report \
 
 ### GET /alerts?status=firing|resolved|all
 
-默认 `all`，按触发时间倒序，最多 200 条。
+默认 `all`，按记录 id 倒序（id 自增，近似触发时间倒序），最多 200 条。
 
 ```json
 { "alerts": [ { "id": 3, "node_id": 3, "node_name": "OpenWrt 软路由",
@@ -311,7 +354,10 @@ curl -X POST http://master:8080/api/v1/report \
 | PUT | `/alerts/rules/:id` | 更新规则，body 同 POST（全字段覆盖；404=规则不存在） |
 | DELETE | `/alerts/rules/:id` | 删除规则 |
 
-- `metric` 枚举：`cpu` | `mem_pct` | `disk_pct`；`threshold` 0~100；`op` 为 `>`（默认）或 `>=`。
+- `metric` 枚举：`cpu` | `mem_pct` | `disk_pct` | `load1` | `net_rx` | `net_tx` | `temp`；
+  `threshold` 上限按指标量纲不同（百分比类 0~100、`load1` 0~1000、网速类 0~1TiB/s、`temp` 0~150℃）；
+  `op` 为 `>`（默认）或 `>=`。
+- `temp` 取样本里的最高温度（服务端从 `live.temps` 提取）；**节点无温度传感器时为 0**，不会误触发。
 - 触发时机：**上报时同步评估**，前端在收到 `metrics` WS 消息后立刻查 `/alerts` 即可看到新告警。
 
 ---
@@ -324,7 +370,10 @@ curl -X POST http://master:8080/api/v1/report \
 ws://<master>:8080/api/v1/ws
 ```
 
-- 无需鉴权；建议前端断线后指数退避重连（1s / 2s / 4s，上限 30s）。
+- **鉴权**：未开启「访问密码」时匿名可连；开启后需 `view`/`admin` 凭证——浏览器用会话 Cookie，
+  App / 脚本用请求头 `Authorization: Bearer cck_...`，或 `?access_token=cck_...`（部分 WS 客户端无法自定义头）。
+  仅在握手时校验一次，连上后会话过期不会主动断开。
+- 建议前端断线后指数退避重连（1s / 2s / 4s，上限 30s）。
 - Vite 开发环境已代理 `/api/v1/ws`。
 
 ### 消息格式
@@ -382,6 +431,17 @@ ws://<master>:8080/api/v1/ws
 
 `online`：节点从离线恢复（采集入库 / Agent 上报触发）；`offline`：离线巡检判定（10 秒周期，超过 3×上报周期未收到数据）。前端收到后直接更新该节点状态灯并刷新 `/summary`。
 
+**⑤ 告警事件（实时推送）**
+
+```json
+{ "type": "alert_firing",   "node_id": 7, "metric": "cpu", "level": "warning", "value": 92.5 }
+{ "type": "alert_resolved", "node_id": 7, "metric": "cpu" }
+```
+
+- `metric` 取值同告警接口：`cpu` / `mem_pct` / `disk_pct` / `load1` / `net_rx` / `net_tx` / `offline`。
+- 离线告警的 `value` 为「已离线秒数」。
+- 收到后刷新 `/alerts?status=firing` 或就地更新告警列表；**这比轮询更及时**，建议前端优先使用。
+
 ### 推送时机
 
 每次 `POST /report`（或 SSH/API 采集入库）成功后立即推送该节点的 `metrics` 与 `live`（含实时明细时）。
@@ -402,10 +462,11 @@ ws://<master>:8080/api/v1/ws
 
 | 状态码 | 场景 |
 |---|---|
-| 400 | 参数错误（JSON 非法 / id 非法 / range 非法 / name 缺失） |
-| 401 | `X-CC-Node-Token` 无效 / 面板会话缺失或过期（开启访问密码后的读写接口） |
-| 403 | 节点已停用（`enabled=false`） / 跨站 Origin 拒绝（CSRF 防护） / join key 错误 |
-| 404 | 节点 / 规则不存在 |
+| 400 | 参数错误（JSON 非法 / id 非法 / range 非法 / name 缺失 / API Key 的 scope 非法 / 规则指标或阈值越界） |
+| 401 | `X-CC-Node-Token` 无效 / `Authorization: Bearer` 无效、已吊销 / 面板会话缺失或过期（开启访问密码后的读写接口） / 用 `view` 权限的 Key 调写接口 |
+| 403 | 节点已停用（`enabled=false`） / 跨站 Origin 拒绝（CSRF 防护，**仅对无 Bearer 的浏览器凭证生效**；WS 握手同样校验 Origin） / join key 错误 |
+| 404 | 节点 / 规则 / API Key 不存在 |
+| 429 | **登录失败过多被临时锁定**（连续 5 次 → 1 分钟，10 次 → 5 分钟，15 次 → 30 分钟）；响应带 `Retry-After` 秒数 |
 | 500 | 服务端内部错误（DB 等） |
 
 ---
@@ -414,10 +475,10 @@ ws://<master>:8080/api/v1/ws
 
 1. **详情页 range 映射**：页面「半年」→ `180d`，「一年」→ `365d`。
 2. **实时信息**：详情页顶部“当前实时”卡片用 `detail.latest` 初始化，之后由 WS `metrics` 刷新。
-3. 尚在开发（不影响已文档化接口）：
-   - 模式 B（SSH 轮询）/ 模式 C（PVE/ESXi API）的节点数据将复用同一套 `/nodes`、`/history` 结构；
-   - Agent 二进制分发下载地址（`install-script` 中的下载指令为占位，需随发布补充）；
-   - `--install` 交互式服务注册、正向连接（Agent listen 模式）。
+3. **采集模式均已实现**：模式 B（SSH）见第 13 节、正向连接（`direction=pull`）见第 14 节、ESXi 见第 15 节、
+   PVE 见第 17 节、群晖 DSM 见第 18 节，数据统一落到 `/nodes`、`/history` 同一套结构，前端无需区分。
+4. 仍待完善：
+   - `install-script` 返回的安装指令中，Agent 二进制下载地址目前是占位注释（正式分发走程序池 `GET /pool/:id/download`，需节点 Token）。
 
 ---
 
@@ -428,17 +489,56 @@ ws://<master>:8080/api/v1/ws
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
 | GET | `/auth/status` | 公开 | `{"admin_set": bool, "view_enabled": bool}` |
-| GET | `/auth/whoami` | 公开 | `{"scope": "" \| "view" \| "admin"}`（按 Cookie） |
+| GET | `/auth/whoami` | 公开 | `{"scope": "" \| "view" \| "admin", "via": "" \| "cookie" \| "key"}` |
 | POST | `/auth/setup` | 公开（仅一次） | `{"password": "≥6位"}` 设置管理员密码并直接登录 |
 | POST | `/auth/login` | 公开 | `{"password":"...","scope":"admin"\|"view"}` → 下发会话 Cookie |
 | POST | `/auth/logout` | 任意 | 清除会话 |
+| POST | `/auth/refresh` | 会话 | 会话续期：有效 Cookie 换新 Cookie（再延 7 天）；会话已过期返回 401。**Bearer Key 不过期，无需调用** |
+| GET | `/auth/metrics-token` | admin | `{"set":bool}` — `/metrics` 抓取令牌是否已设置（不回传明文） |
+| PUT | `/auth/metrics-token` | admin | `{"token":"..."}` 设置/替换；**空串=关闭校验**（`/metrics` 恢复开放） |
+| GET | `/backup` | admin | **配置导出**：下载 JSON（节点/规则/站点/展示类设置），**不含** Token、SSH 凭据、API Key 哈希、各类密码 |
+| POST | `/restore` | admin | **配置恢复**：body 为备份 JSON。**只新增不覆盖**（同名节点/同参数规则跳过）；导入的 Agent 节点生成**新 Token**；规则按 `node_name` 映射到新节点 ID |
+| GET | `/audit?limit=100` | admin | **操作审计**：`{"logs":[{id,ts,actor,method,path,status,ip}]}`，记录管理员的 POST/PUT/DELETE（成功才记），保留 90 天 |
 | POST | `/auth/password` | admin | `{"old_password","new_password"}` 修改管理员密码 |
 | GET | `/auth/view` | admin | `{"enabled":bool,"password_separate":bool}` |
 | PUT | `/auth/view` | admin | `{"enabled":bool,"password":"可选,≥6位"}` 前台访问密码开关（留空=用管理员密码） |
 | GET | `/auth/join-key` | admin | `{"join_key":"..."}` 不存在自动生成 |
 | POST | `/auth/join-key/rotate` | admin | 重置 Join Key（旧值立即失效） |
+| GET | `/auth/api-key` | admin | `{"set":bool,"scope":"admin"\|"view"}` — 兼容接口，仅反映 `default` 凭证；**不返回明文** |
+| POST | `/auth/api-key/rotate` | admin | **兼容接口**，重置 `default` 凭证：`{"scope":"admin"\|"view"}`（可省，默认 admin）→ `{"api_key":"cck_...","scope":"..."}`，**明文仅此一次** |
+| DELETE | `/auth/api-key` | admin | **兼容接口**，吊销 `default` 凭证 |
+| GET | `/auth/api-keys` | admin | **多凭证列表**：`{"keys":[{"id","name","scope","created_at"}]}`（不含明文/哈希） |
+| POST | `/auth/api-keys` | admin | **新建凭证**：`{"name","scope":"admin"\|"view"}` → `{"key":{...},"api_key":"cck_..."}`，明文仅此一次 |
+| DELETE | `/auth/api-keys/:id` | admin | **吊销指定凭证**（只影响该条，其它设备不受影响） |
 | POST | `/register` | Join Key | 自注册入网：`{"join_key","name?","os_type?","address?"}` → `{"node_id","token","approved":false}` |
 | PUT | `/nodes/:id` | admin | body 增加 `"approved": true/false`（批准 / 撤回） |
+
+**API Key（非浏览器客户端）**
+
+推荐用**多凭证**接口：每台设备 / 每个脚本各签一条，吊销互不影响。
+
+```bash
+# 1) 为每台设备签发（管理员会话；面板「API Key」区块亦可）
+curl -s -b ck.txt -X POST http://<master>:8080/api/v1/auth/api-keys \
+     -H "Content-Type: application/json" -d '{"name":"我的手机","scope":"view"}'
+# → {"key":{"id":2,"name":"我的手机","scope":"view","created_at":...},"api_key":"cck_3f2a..."}
+
+# 2) 之后的请求只需 Bearer 头，无需任何 Cookie
+curl -s http://<master>:8080/api/v1/nodes -H "Authorization: Bearer cck_3f2a..."
+
+# 3) WebSocket：请求头或 query 二选一（部分 WS 客户端无法自定义头）
+ws://<master>:8080/api/v1/ws                                    # 头：Authorization: Bearer cck_...
+ws://<master>:8080/api/v1/ws?access_token=cck_3f2a...           # query 兜底（会进访问日志，慎用公网）
+
+# 4) 查看 / 吊销
+curl -s -b ck.txt http://<master>:8080/api/v1/auth/api-keys
+curl -s -b ck.txt -X DELETE http://<master>:8080/api/v1/auth/api-keys/2
+```
+
+- 仅存 SHA-256 哈希，明文丢失只能重新生成；`scope=view` 的 Key 调用写接口返回 **401**。
+- **吊销某条只影响该设备**，其它 Key 继续可用（旧版单 Key 的 `rotate` 会踢掉所有设备，已改为兼容接口 `default` 一条）。
+- 旧的 `/auth/api-key`、`/auth/api-key/rotate`、`DELETE /auth/api-key` 仍然可用，
+  它们操作的是名为 `default` 的那条凭证，便于老客户端平滑过渡。
 
 **入网审批流程**
 
@@ -452,7 +552,7 @@ ws://<master>:8080/api/v1/ws
 
 管理员在面板直接「添加节点」创建的节点默认已批准（approved=true），无需走上述流程。
 
-**错误码补充**：`401`（无会话 / 密码错误 / Token 无效）、`403`（pending approval、join key 错误、节点停用）、`400`（密码 <6 位、重复初始化）。
+**错误码补充**：`401`（无会话 / 密码错误 / 节点 Token 或 API Key 无效）、`403`（pending approval、join key 错误、节点停用）、`400`（密码 <6 位、重复初始化、API Key 的 scope 非法）。
 
 ---
 
@@ -460,7 +560,7 @@ ws://<master>:8080/api/v1/ws
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/notify/config` | admin | `{"enabled","channel":"pushplus\|feishu\|dingtalk\|wecom\|webhook\|smtp","token_set","url_set",smtp_host,port,user,from,to,smtp_pass_set}`（密文不回传） |
+| GET | `/notify/config` | admin | `{"enabled","channel":"pushplus\|feishu\|dingtalk\|wecom\|webhook\|smtp\|ntfy\|telegram","token_set","url_set",smtp_host,port,user,from,to,smtp_pass_set}`（密文不回传） |
 | PUT | `/notify/config` | admin | `{"enabled","channel","token?","url?",smtp_host?,smtp_port?,smtp_user?,smtp_pass?,smtp_from?,smtp_to?}` — 密文字段**不传或空 = 保持不变** |
 | POST | `/notify/test` | admin | 无视开关强制发一条测试消息；失败返回 502 + 原因（结果落库） |
 | GET | `/notify/logs` | admin | 最近发送记录 `{"logs":[{id,ts,channel,title,ok,error}]}`（最多 50 条，保留 30 天） |
@@ -471,6 +571,11 @@ ws://<master>:8080/api/v1/ws
   body 分别为 `{"msg_type":"text","content":{"text":"标题\n内容"}}` 与 `{"msgtype":"text","text":{"content":...}}`。
 - `webhook`：POST 配置的 URL，body `{title,content,source:"CC_DashBoard"}`。
 - `smtp`：net/smtp 直发——465 隐式 TLS、587 STARTTLS（协商）、25 明文；PLAIN 认证（Go 强制 TLS 上下文）；主题 RFC 2047（=?UTF-8?B?）、正文 base64；收件人逗号分隔多址；`smtp_from` 空则用用户名。
+- `ntfy`：**手机推送，无需自建 App**——`url` 填主题地址（`https://ntfy.sh/<topic>` 或自建实例），
+  `token` 可选（受保护主题的访问令牌）。手机装 ntfy App 订阅同一主题即可收到系统通知；
+  发送方式为 POST 纯文本（`Title` 头带标题），实测可用。适合替代 FCM 这类需要客户端的方案。
+- `telegram`：Bot API——`token` 填 bot token（@BotFather 获取），`url` 填 `chat_id`
+  （个人 `123456789`，群组 `-1001234567890`）。需先把 bot 拉进目标会话并发一条消息。
 - 通知为异步发送，**失败自动重试 3 次（立即 / +1s / +3s）**；成功/最终失败均写入 `notify_logs`（后台「告警通知」区可见），不阻塞采集链路。
 
 ---
@@ -497,28 +602,6 @@ ws://<master>:8080/api/v1/ws
 - **认证方式**：密码（`password` + **`keyboard-interactive` 双方法**——ESXi/部分设备禁用 password 只留 kbd-interactive，已兼容）或私钥（`private_key`）。
 - 采集内容：Linux 解析 `/proc/stat|meminfo|loadavg|net/dev` + `df`（CPU/网速跨轮差分，首轮为开机以来均值）；Windows 经 `-EncodedCommand` 执行 PowerShell CIM 查询（CPU/内存/磁盘/运行时长；v1 暂无分网卡速率）。
 - 主机密钥：TOFU 首连信任（见第 13 节），可用 `rotate_host_key` 重置；ESXi 若连接报认证失败，确认已开 SSH 且密码正确（password/keyboard-interactive 均已支持）。
-
----
-
-## 18. 群晖 Synology DSM 接入（模式 C 变体）
-
-**添加步骤**：DSM 创建专用监控账号（**关闭两步验证**）→ 面板添加节点：`os_type="nas"`、`access_mode="api"`、地址 + 端口（**5001=HTTPS / 5000=HTTP**）+ DSM 账号密码。
-
-- 认证：`SYNO.API.Auth`（version=3，兼容 DSM 6/7）登录换 SID，**SID 缓存 2 小时**，接口失效自动重登一次。
-- 采集（**DSM 7.2.2 真机校准 2026-10-10**）：`SYNO.Core.System.Utilization` CPU=`user_load+system_load+other_load`（DSM7；DSM6 兼容 user/system/idle）、内存=`total_real/avail_real/buffer/cached`（**KB**）、**网络 rx/tx 为瞬时速率 B/s（非累计）**、`disk.total` 为 B/s+IOPS；`SYNO.Core.System` **method=info**（getinfo 已下线）→ `up_time`/`sys_temp`/机型；`SYNO.Core.Network` get → `server_name` 主机名；`SYNO.Core.System.Process` list → **进程 Top5**（cpu 0.1% 粒度、mem KB）；`SYNO.Storage.CGI.Storage` load_info → **卷容量**（disk_pct 与挂载点；`space.utilization` 是繁忙度非容量）。
-- HTTPS 自签跳过校验；PVE 与群晖同用 `access_mode=api`，**按 `os_type` 分派**（`pve`→PVE API，`nas`→DSM API）。
-- 每核 CPU：DSM 无 per-core 字段 → 面板每核区显示暂无数据（平台不支持）。
-- 单测覆盖：DSM7/DSM6 双口径、网络速率直采、进程排序、存储容量、up_time 解析、登录与主机名缓存。
-
----
-
-## 19. 构建与打包（build.ps1 第 5 步）
-
-`powershell -ExecutionPolicy Bypass -File build.ps1` 依次：前端 → 嵌入 → 服务端 4 目标 → Agent 5 目标 → **打包**：
-
-- **ipk**（OpenWrt）：`tools/mkipk` 纯 Go 构建（ipkg 格式：gzip 压缩的 tar，成员 = ./debian-binary + ./control.tar.gz + ./data.tar.gz；**不支持 Debian ar 归档**，opkg 解析会报 "Malformed package file"）；架构映射 mipsle→`mipsel_24kc`、armv7→`arm_cortex-a7`、arm64→`aarch64_cortex-a53`、amd64→`x86_64`（可用 `-arch` 参数按设备调整）；
-- **deb/rpm**：检测到 `nfpm` 时自动打包 amd64/arm64（模板 `nfpm-agent.yml`）；安装：`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`；
-- msi 不再需要——服务注册由 `--install` 方案覆盖（见第 16 节）。
 
 ---
 
@@ -572,7 +655,7 @@ cc-agent --install       # 问答：Master/Token/模式/监听端口/周期
                           # → 写入 exe 同目录 cc-agent.config.json
                           # → 注册服务（Windows=sc、Linux=systemd、OpenWrt=procd）
 cc-agent --config <文件>  # 服务模式加载配置；显式命令行 flag 优先
-cc-server --install      # 问答：端口/数据目录/前端目录 → 同样注册服务
+cc-dashboard --install      # 问答：端口/数据目录/前端目录 → 同样注册服务
 ```
 
 - 非管理员权限时自动降级：打印手动注册命令（sc/systemd ExecStart）后退出，配置文件仍会写入；
@@ -599,6 +682,28 @@ POST /nodes
 
 ---
 
+## 18. 群晖 Synology DSM 接入（模式 C 变体）
+
+**添加步骤**：DSM 创建专用监控账号（**关闭两步验证**）→ 面板添加节点：`os_type="nas"`、`access_mode="api"`、地址 + 端口（**5001=HTTPS / 5000=HTTP**）+ DSM 账号密码。
+
+- 认证：`SYNO.API.Auth`（version=3，兼容 DSM 6/7）登录换 SID，**SID 缓存 2 小时**，接口失效自动重登一次。
+- 采集（**DSM 7.2.2 真机校准 2026-10-10**）：`SYNO.Core.System.Utilization` CPU=`user_load+system_load+other_load`（DSM7；DSM6 兼容 user/system/idle）、内存=`total_real/avail_real/buffer/cached`（**KB**）、**网络 rx/tx 为瞬时速率 B/s（非累计）**、`disk.total` 为 B/s+IOPS；`SYNO.Core.System` **method=info**（getinfo 已下线）→ `up_time`/`sys_temp`/机型；`SYNO.Core.Network` get → `server_name` 主机名；`SYNO.Core.System.Process` list → **进程 Top5**（cpu 0.1% 粒度、mem KB）；`SYNO.Storage.CGI.Storage` load_info → **卷容量**（disk_pct 与挂载点；`space.utilization` 是繁忙度非容量）。
+- HTTPS 自签跳过校验；PVE 与群晖同用 `access_mode=api`，**按 `os_type` 分派**（`pve`→PVE API，`nas`→DSM API）。
+- 每核 CPU：DSM 无 per-core 字段 → 面板每核区显示暂无数据（平台不支持）。
+- 单测覆盖：DSM7/DSM6 双口径、网络速率直采、进程排序、存储容量、up_time 解析、登录与主机名缓存。
+
+---
+
+## 19. 构建与打包（build.ps1 第 5 步）
+
+`powershell -ExecutionPolicy Bypass -File build.ps1` 依次：前端 → 嵌入 → 服务端 4 目标 → Agent 5 目标 → **打包**：
+
+- **ipk**（OpenWrt）：`tools/mkipk` 纯 Go 构建（ipkg 格式：gzip 压缩的 tar，成员 = ./debian-binary + ./control.tar.gz + ./data.tar.gz；**不支持 Debian ar 归档**，opkg 解析会报 "Malformed package file"）；架构映射 mipsle→`mipsel_24kc`、armv7→`arm_cortex-a7`、arm64→`aarch64_cortex-a53`、amd64→`x86_64`（可用 `-arch` 参数按设备调整）；
+- **deb/rpm**：检测到 `nfpm` 时自动打包 amd64/arm64（模板 `nfpm-agent.yml`）；安装：`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`；
+- msi 不再需要——服务注册由 `--install` 方案覆盖（见第 16 节）。
+
+---
+
 ## 20. 指标导出
 
 ### GET /metrics — Prometheus 抓取端点
@@ -615,9 +720,21 @@ POST /nodes
 | `cc_node_net_rx_bytes_per_second` / `cc_node_net_tx_bytes_per_second` | gauge | 网络速率 |
 | `cc_node_uptime_seconds` | gauge | 运行时长 |
 | `cc_node_disk_read_bytes_per_second` / `cc_node_disk_write_bytes_per_second` | gauge | 磁盘 I/O（历史落盘列） |
+| `cc_node_temp_max` | gauge | 最高温度 ℃（0=无传感器） |
 | `cc_scrape_nodes_total` | gauge | 已批准节点总数 |
 
-- 鉴权：**端点本身不校验会话**（Prometheus 无法携带 Cookie）；公网部署请在反代层限制来源 IP（见《使用部署手册》反代章节）。
+- 鉴权：**默认开放**（Prometheus 无法携带 Cookie）；可在面板「安全设置」里设置**抓取令牌**，
+  设置后需带 `?token=<令牌>`（或 `Authorization: Bearer`），否则 401。留空保存即恢复开放。
+  Prometheus 侧用 `params` 配置：
+
+```yaml
+  - job_name: cc_dashboard
+    metrics_path: /metrics
+    params:
+      token: ["<令牌>"]
+    static_configs:
+      - targets: ['master:8080']
+```
 - Prometheus 配置示例：
 
 ```yaml
@@ -627,6 +744,17 @@ scrape_configs:
     static_configs:
       - targets: ['master:8080']
 ```
+
+### GET /healthz — 健康检查
+
+供容器 liveness/readiness 探针与反代上游检测，**无需鉴权**、不暴露业务数据：
+
+```json
+{ "status": "ok" }
+```
+
+- 数据库不可用时返回 `503` + `{"status":"degraded","db":"down"}`，便于编排系统摘除实例。
+- 与 `/metrics` 一样不在 `/api/v1` 下，注意反代规则要放行。
 
 ---
 
@@ -641,7 +769,7 @@ scrape_configs:
 ```json
 { "items": [ { "id": 3, "component": "agent", "version": "0.2.0",
                "goos": "linux", "arch": "amd64", "format": "bin",
-               "filename": "9f2c…_cc-agent-linux-amd64", "sha256": "…",
+               "filename": "9f2c…_cc-agent-<版本>-linux-amd64", "sha256": "…",
                "size": 7340032, "note": "", "created_at": 1791558000 } ],
   "ota_enabled": false, "server_version": "0.1.0" }
 ```
@@ -659,8 +787,8 @@ scrape_configs:
 
 **一次性上传整批构建产物，按文件名自动识别元数据**：
 
-- 字段：`files[]`（多文件，≤64 个）+ `version`（**兜底版本**，用于文件名不含版本的裸二进制，如 `cc-agent-linux-amd64`）；
-- 识别规则（`build.ps1` 产物命名）：`cc-agent|cc-server|cc-dashboard` → 组件；`-linux-/-windows-` → 系统；`amd64/arm64/armv7/mipsle` 与 `x86_64/aarch64/mipsel_24kc/arm_cortex-a7/aarch64_cortex-a53` → 架构；`.deb/.rpm/.ipk` 与裸二进制 → 格式；`_<ver>_` / `-<ver>-1.` / `-<ver>-<opkg_arch>` → 版本；
+- 字段：`files[]`（多文件，≤64 个）+ `version`（**兜底版本**：文件名能解析出版本时优先用文件名，仅当解析不出时才用此值，如被手工改名的 `cc-agent-linux-amd64`）；
+- 识别规则（`build.ps1` 产物命名）：`cc-agent|cc-dashboard`（旧名 `cc-server` 仍兼容识别）→ 组件；`-linux-/-windows-` → 系统；`amd64/arm64/armv7/mipsle` 与 `x86_64/aarch64/mipsel_24kc/arm_cortex-a7/aarch64_cortex-a53` → 架构；`.deb/.rpm/.ipk` 与裸二进制 → 格式；`_<ver>_` / `-<ver>-1.` / `-<ver>-<opkg_arch>` / `-<ver>-linux-`（裸二进制）→ 版本；
 - 响应：`{"uploaded": [{"name","item"}], "skipped": [{"name","reason"}]}`——无法识别或缺版本的文件进 `skipped` 并给出原因。
 
 ### PUT /pool/ota（管理员）

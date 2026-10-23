@@ -20,14 +20,21 @@
           class="rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-400"
           title="Agent 版本"
         >
-          Agent v{{ node.agent_version }}
+          Agent {{ fmtVer(node.agent_version) }}
+        </span>
+        <span
+          v-if="node?.agent_mem"
+          class="rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-400"
+          title="Agent 自身内存占用（非主机内存）"
+        >
+          Agent 内存 {{ fmtBytes(node.agent_mem) }}
         </span>
         <span
           v-if="node?.upgrade"
           class="rounded bg-emerald-900/60 px-2 py-1 text-[11px] text-emerald-300"
           title="程序池中有可升级版本"
         >
-          可升级 → v{{ node.upgrade.version }}
+          可升级 → {{ fmtVer(node.upgrade.version) }}
         </span>
         <button
           v-if="auth.isAdmin && node?.upgrade"
@@ -44,17 +51,28 @@
           ⚙ 硬件详情
         </button>
       </div>
-      <div class="flex gap-2 text-xs">
+      <div class="flex flex-wrap gap-1.5 text-xs sm:gap-2">
         <button
           v-for="r in ranges"
           :key="r"
-          class="rounded bg-slate-800 px-3 py-1.5 text-slate-300 hover:bg-slate-700"
+          class="rounded bg-slate-800 px-2.5 py-1.5 text-slate-300 hover:bg-slate-700 sm:px-3"
           :class="{ '!bg-emerald-700 text-white': r === activeRange }"
           @click="activeRange = r"
         >
           {{ r }}
         </button>
       </div>
+    </div>
+
+    <!-- 采集失败原因：解释「为什么离线 / 为什么没数据」，成功采集后自动消失 -->
+    <div
+      v-if="node?.last_error"
+      class="flex flex-wrap items-center gap-2 rounded-lg border border-amber-900 bg-amber-950/40 px-3 py-2 text-xs text-amber-300"
+    >
+      <span class="font-medium">⚠ 最近一次采集失败</span>
+      <span class="text-amber-200/80">{{ node.last_error }}</span>
+      <span v-if="node.last_error_at" class="text-amber-500/70">· {{ fmtClock(node.last_error_at) }}</span>
+      <span class="text-amber-500/60">（采集成功后自动清除）</span>
     </div>
 
     <!-- 当前实时：6 项核心 -->
@@ -434,7 +452,7 @@ import { useNodesStore } from '../stores/nodes'
 import { useAuthStore } from '../stores/auth'
 import { getJSON, postJSON } from '../api'
 import MetricChart from '../components/MetricChart.vue'
-import { fmtRate, fmtBytes, fmtUptime, fmtPct, statusDotClass, statusText } from '../utils/format'
+import { fmtRate, fmtBytes, fmtUptime, fmtPct, statusDotClass, statusText, fmtVer } from '../utils/format'
 
 const props = defineProps({ id: { type: String, required: true } })
 
@@ -444,10 +462,10 @@ const auth = useAuthStore()
 async function triggerUpgrade() {
   const n = node.value
   if (!n?.upgrade) return
-  if (!confirm(`立即升级「${n.name}」到 v${n.upgrade.version}？\n（节点下次上报时生效）`)) return
+  if (!confirm(`立即升级「${n.name}」到 ${fmtVer(n.upgrade.version)}？\n（节点下次上报时生效）`)) return
   try {
     const r = await postJSON(`/nodes/${n.id}/upgrade`, {})
-    alert(`已标记升级：v${r.version}（等待节点下次上报自动下载升级）`)
+    alert(`已标记升级：${fmtVer(r.version)}（等待节点下次上报自动下载升级）`)
     loadDetail()
   } catch (e) {
     alert(`下发失败: ${e.message}`)
@@ -467,7 +485,7 @@ const showHw = ref(false)
 let pollTimer = null
 
 const store = useNodesStore()
-const { nodes, liveById } = storeToRefs(store)
+const { nodes, liveById, connected } = storeToRefs(store)
 
 const node = computed(() => nodes.value.find((n) => n.id === Number(props.id)) || detail.value?.node || null)
 const latest = computed(() => node.value?.latest || detail.value?.latest || null)
@@ -661,7 +679,15 @@ watch(
 onMounted(() => {
   loadDetail()
   loadHistory()
-  pollTimer = setInterval(loadDetail, 5000) // WS 为主，轮询兜底（含硬件清单）
+  startPoll()
 })
 onBeforeUnmount(() => clearInterval(pollTimer))
+
+// 轮询节流：WS 正常时 30 秒兜底一次（补 detail/hardware 等不推送的字段）；
+// 断线时回到 5 秒，尽快发现恢复。每次切换都重建定时器，避免两套频率并存。
+function startPoll() {
+  clearInterval(pollTimer)
+  pollTimer = setInterval(loadDetail, connected.value ? 30000 : 5000)
+}
+watch(connected, startPoll)
 </script>

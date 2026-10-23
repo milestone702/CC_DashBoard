@@ -19,7 +19,7 @@
 | 导出 | Prometheus `/metrics` 抓取端点；历史数据 CSV 导出（Excel 直开） |
 | 网络与记录 | 节点地址**双行显示内网 / 公网 IP**（上报连接源 IP 为主、Agent 自查兜底）；开关机记录自动入库（按节点+时间+类型去重），详情页展示 |
 | 程序池 / OTA | 管理页上传 Agent / Dashboard 程序到"池"，节点按版本与架构显示**可升级**提示；OTA 总开关默认关，开启后 Agent 自动升级（下载 sha256 校验、升级失败自动回滚；OpenWrt 仅提示不执行） |
-| 交付 | `build.ps1` 一键产出 Win/Linux×2/树莓派 服务端 + 5 架构 Agent + ipk/deb/rpm（**服务端也有 deb/rpm**）；版本号构建时交互生成（记录于 `VERSION`，回车自动 +0.1，`-Version` 指定大版本）注入二进制与安装包；安装包内置 systemd unit / OpenWrt init.d，**装完自动注册开机自启**；`--install` 交互式注册（sc / systemd / procd）；Windows exe 内嵌应用图标与版本信息，deb/rpm/ipk 包内自带应用图标 |
+| 交付 | `build.ps1` 一键产出 Win/Linux×2/树莓派 服务端 + 5 架构 Agent + ipk/deb/rpm（**服务端也有 deb/rpm**）；版本号构建时交互生成（记录于 `VERSION`，**统一三段式**，回车次版本 +1，`-Version` 指定主版本）注入二进制与安装包；安装包内置 systemd unit / OpenWrt init.d，**装完自动注册开机自启**；`--install` 交互式注册（sc / systemd / procd）；Windows exe 内嵌应用图标与版本信息，deb/rpm/ipk 包内自带应用图标 |
 
 ## 快速开始
 
@@ -28,7 +28,7 @@
 powershell -ExecutionPolicy Bypass -File build.ps1
 
 # 2. 启动（单端口：API + 面板）
-.\build\cc-server-windows-amd64.exe -addr :8080 -data data
+.\build\cc-dashboard-<版本>-windows-amd64.exe -addr :8080 -data data
 
 # 3. 打开 http://127.0.0.1:8080/
 #    首次进入「节点管理」会引导设置管理员密码
@@ -46,39 +46,37 @@ Linux / NAS / Windows / OpenWrt / ESXi 的分平台接入步骤见 **[使用部�
 
 ## 架构
 
-```
-┌─────────────────────────────────────────────┐
-│   Vue3 前端（概览 / 详情 / 管理，已嵌入后端）  │
-└──────────────────▲──────────────────────────┘
-                   │ WebSocket 实时 + REST
-┌──────────────────┴──────────────────────────┐
-│         Go Master（单二进制 :8080）           │
-│  节点管理 · SQLite 降采样 · 告警引擎 · 通知    │
-└──▲────────────────▲─────────────────▲───────┘
-   │ Agent 上报      │ SSH 轮询         │ REST API
-┌──┴──────────┐ ┌────┴─────────┐ ┌─────┴────────┐
-│ Go Agent    │ │ Linux/Win/   │ │ PVE/群晖/    │
-│ push/listen │ │ NAS/OpenWrt  │ │ ESXi         │
-└─────────────┘ │ ESXi（零安装）│ └──────────────┘
-                └──────────────┘
+```mermaid
+flowchart TB
+    FE["Vue3 前端（概览 / 详情 / 管理，已嵌入后端）"]
+    M["Go Master（单二进制 :8080）<br/>节点管理 · SQLite 降采样 · 告警引擎 · 通知"]
+    A["Go Agent<br/>push / listen"]
+    S["Linux/Win/NAS/OpenWrt<br/>ESXi（零安装）"]
+    P["PVE/群晖/ESXi"]
+    FE <-->|"WebSocket 实时 + REST"| M
+    M -->|"Agent 上报"| A
+    M -->|"SSH 轮询"| S
+    M -->|"REST API"| P
 ```
 
 ## 目录结构
 
 ```
 ├── server/            # Go 后端（api / store / collector / alert / notify / auth）
-│   └── deploy/        # Dockerfile、docker-compose.yml
+│   ├── deploy/        # Dockerfile、docker-compose.yml
+│   └── internal/webui/dist/  # 构建时嵌入的前端产物（build.ps1 从 web/dist 同步）
 ├── web/               # Vue3 前端（Vite + Pinia + ECharts + Tailwind）
 ├── agent-go/          # Go Agent（唯一采集端，push 与 listen 双模式）
 ├── tools/mkipk/       # OpenWrt .ipk 打包工具（纯 Go，含 init.d/postinst 模板）
 ├── packaging/         # systemd unit、配置模板、应用图标与 Windows 版本资源（deb/rpm/ipk 包内文件）
-├── docs/              # API 接口契约 / 使用部署手册
+├── intro-page/        # 项目介绍页（静态 HTML）与界面截图
+├── docs/              # 接口契约 + 部署手册：API.md / APP-API.md / APP-DESIGN.md / 使用部署手册.md
+├── .github/workflows/ # CI：构建与测试
 ├── build.md           # 构建产物选型说明
 ├── build.ps1          # 一键构建 + 打包（交互式版本号，产物进 build/）
-├── VERSION            # 当前版本号（构建时生成/递增，回车 +0.1，可手改）
+├── VERSION            # 当前版本号（三段式，构建时生成/次版本递增，可手改）
 ├── nfpm-agent.yml     # Agent deb/rpm 打包模板（含 postinstall 自启）
-├── nfpm-server.yml    # 服务端 deb/rpm 打包模板
-└── CC_DashBoard_开发文档.md
+└── nfpm-server.yml    # 服务端 deb/rpm 打包模板
 
 > 构建产物全部在 `build/`（选型见 [build.md](build.md)），该目录与 `data/` 均不入库。
 ```
@@ -87,10 +85,12 @@ Linux / NAS / Windows / OpenWrt / ESXi 的分平台接入步骤见 **[使用部�
 
 | 文档 | 内容 |
 |---|---|
-| [docs/使用部署手册.md](docs/使用部署手册.md) | 部署、各平台接入、面板使用、FAQ |
+| [docs/使用部署手册.md](docs/使用部署手册.md) | 部署、各平台接入、面板使用、升级与兼容性、故障排查 |
 | [docs/API.md](docs/API.md) | REST / WebSocket 完整接口契约（前端与采集端对接） |
+| [docs/APP-API.md](docs/APP-API.md) | 安卓 App 精简接口参考（Kotlin 数据模型、WebSocket 重连） |
+| [docs/APP-DESIGN.md](docs/APP-DESIGN.md) | 安卓 App 产品与技术设计（页面结构、多面板、登录方案） |
 | [build.md](build.md) | 构建产物选型：哪个文件用于哪个平台 |
-| [CC_DashBoard_开发文档.md](CC_DashBoard_开发文档.md) | 总体设计、数据模型 |
+| [intro-page/index.html](intro-page/index.html) | 项目介绍页（特性概览 + 界面截图） |
 
 ## 开发
 

@@ -3,12 +3,19 @@
     <div class="mb-5 flex flex-wrap items-center gap-3">
       <h2 class="text-xl font-semibold">全局设备概览</h2>
       <span class="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400">
-        在线 {{ summary.online }} / 总计 {{ summary.total }} · 告警 {{ summary.alerting }}
+        在线 {{ summary.online }} / 总计 {{ summary.total }} ·
+        <router-link
+          to="/alerts"
+          class="hover:underline"
+          :class="summary.alerting > 0 ? 'font-medium text-danger' : 'text-slate-400'"
+        >
+          告警 {{ summary.alerting }}
+        </router-link>
       </span>
       <span class="rounded-full px-3 py-1 text-xs" :class="badgeClass">{{ badgeText }}</span>
 
-      <!-- 筛选与搜索 -->
-      <div class="ml-auto flex flex-wrap items-center gap-2 text-xs">
+      <!-- 筛选与搜索（手机端整行换行，避免挤压） -->
+      <div class="flex w-full flex-wrap items-center gap-2 text-xs sm:ml-auto sm:w-auto">
         <select
           v-model.number="cols"
           :disabled="!auth.isAdmin"
@@ -38,59 +45,89 @@
           v-model="search"
           type="search"
           placeholder="搜索名称 / 地址…"
-          class="w-44 rounded bg-slate-900 px-2.5 py-1.5 text-slate-300 outline-none ring-slate-700 focus:ring"
+          class="w-full rounded bg-slate-900 px-2.5 py-1.5 text-slate-300 outline-none ring-slate-700 focus:ring sm:w-44"
         />
       </div>
     </div>
 
-    <!-- 响应式设备卡片阵列：PC 4 列 / Pad 2 列 / 手机 1 列（pending 节点不展示；cols>0 时固定列数） -->
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" :style="gridStyle">
-      <div
-        v-for="n in filteredNodes"
-        :key="n.id"
-        class="cursor-pointer rounded-xl border border-slate-800 bg-slate-900 p-4 transition hover:border-emerald-600"
-        @click="$router.push(`/device/${n.id}`)"
+    <!-- 加载失败提示：保留上次成功的数据，明确告知当前不是最新状态 -->
+    <div
+      v-if="lastError"
+      class="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300"
+    >
+      <span class="font-medium">⚠ {{ lastError }}</span>
+      <span class="text-red-400/70">当前展示的可能是上次成功获取的数据</span>
+      <button
+        class="ml-auto rounded bg-red-900/60 px-2.5 py-1 text-red-200 hover:bg-red-900"
+        @click="retryAll"
       >
-        <div class="flex items-center justify-between gap-2">
-          <div class="flex min-w-0 items-center gap-2">
-            <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="statusDotClass(n.status)"></span>
-            <span class="truncate font-medium">{{ n.name }}</span>
-          </div>
-          <span class="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
-            {{ n.os_type }}
-          </span>
-        </div>
-        <!-- 上行内网 IP，下行公网 IP -->
-        <p class="mt-1 text-xs text-slate-500">{{ n.address || '—' }}</p>
-        <p class="mt-0.5 text-xs text-slate-400">{{ n.public_ip || '—' }}</p>
+        重试
+      </button>
+    </div>
 
-        <!-- CPU / 内存 / 磁盘进度条 -->
-        <div class="mt-4 space-y-2.5">
-          <div v-for="m in bars(n)" :key="m.label">
-            <div class="flex items-center justify-between text-[11px] text-slate-400">
-              <span>{{ m.label }}</span>
-              <span :class="{ 'text-danger': m.value >= 90, 'text-warning': m.value >= 75 && m.value < 90 }">
-                {{ n.status === 'offline' ? '—' : m.value + '%' }}
-              </span>
+    <!-- 按分组渲染卡片：全部无分组标签时退化为平铺（与旧版表现一致） -->
+    <template v-for="g in groupedNodes" :key="g.tag || '__ungrouped'">
+      <div v-if="g.tag" class="mb-2 mt-6 flex flex-wrap items-center gap-2">
+        <h3 class="text-sm font-medium text-slate-300">{{ g.tag }}</h3>
+        <span class="text-[11px] text-slate-500">
+          {{ g.nodes.length }} 台 · {{ g.nodes.filter((n) => n.status === 'online').length }} 在线
+        </span>
+      </div>
+      <div
+        class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+        :style="gridStyle"
+      >
+        <div
+          v-for="n in g.nodes"
+          :key="n.id"
+          class="cursor-pointer rounded-xl border border-slate-800 bg-slate-900 p-4 transition hover:border-emerald-600"
+          @click="$router.push(`/device/${n.id}`)"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="statusDotClass(n.status)"></span>
+              <span class="truncate font-medium">{{ n.name }}</span>
             </div>
-            <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-800">
-              <div
-                class="h-full rounded-full transition-all"
-                :class="barColor(n, m.value)"
-                :style="{ width: (n.status === 'offline' ? 0 : m.value) + '%' }"
-              ></div>
+            <span
+              class="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400"
+            >
+              {{ n.os_type }}
+            </span>
+          </div>
+          <!-- 上行内网 IP，下行公网 IP -->
+          <p class="mt-1 text-xs text-slate-500">{{ n.address || '—' }}</p>
+          <p class="mt-0.5 text-xs text-slate-400">{{ n.public_ip || '—' }}</p>
+
+          <!-- CPU / 内存 / 磁盘进度条 -->
+          <div class="mt-4 space-y-2.5">
+            <div v-for="m in bars(n)" :key="m.label">
+              <div class="flex items-center justify-between text-[11px] text-slate-400">
+                <span>{{ m.label }}</span>
+                <span :class="{ 'text-danger': m.value >= 90, 'text-warning': m.value >= 75 && m.value < 90 }">
+                  {{ n.status === 'offline' ? '—' : m.value + '%' }}
+                </span>
+              </div>
+              <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  class="h-full rounded-full transition-all"
+                  :class="barColor(n, m.value)"
+                  :style="{ width: (n.status === 'offline' ? 0 : m.value) + '%' }"
+                ></div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- 网速 / 运行时长 -->
-        <div class="mt-4 flex items-center justify-between border-t border-slate-800 pt-3 text-[11px] text-slate-400">
-          <span title="上传">↑ {{ fmtRate(src(n).net_tx) }}</span>
-          <span title="下载">↓ {{ fmtRate(src(n).net_rx) }}</span>
-          <span>{{ n.status === 'offline' ? '离线' : '运行 ' + fmtUptime(src(n).uptime) }}</span>
+          <!-- 网速 / 运行时长 -->
+          <div
+            class="mt-4 flex items-center justify-between border-t border-slate-800 pt-3 text-[11px] text-slate-400"
+          >
+            <span title="上传">↑ {{ fmtRate(src(n).net_tx) }}</span>
+            <span title="下载">↓ {{ fmtRate(src(n).net_rx) }}</span>
+            <span>{{ n.status === 'offline' ? '离线' : '运行 ' + fmtUptime(src(n).uptime) }}</span>
+          </div>
         </div>
       </div>
-    </div>
+    </template>
 
     <p v-if="visibleNodes.length === 0" class="mt-10 text-center text-sm text-slate-500">加载中…</p>
     <p v-else-if="filteredNodes.length === 0" class="mt-10 text-center text-sm text-slate-500">
@@ -109,7 +146,7 @@ import { fmtRate, fmtUptime, statusDotClass } from '../utils/format'
 
 const store = useNodesStore()
 const auth = useAuthStore()
-const { nodes, summary, connected, mockMode } = storeToRefs(store)
+const { nodes, summary, connected, mockMode, lastError } = storeToRefs(store)
 
 // 每行卡片数：存服务端数据库（换设备/清缓存不丢）；0=响应式默认。
 // 全局设置：仅管理员可改（访客回读即用，避免 view 会话 PUT 401 被弹回登录页）。
@@ -138,11 +175,17 @@ onMounted(loadCols)
 // 待审批节点不进概览（服务端已过滤，这里双保险）
 const visibleNodes = computed(() => nodes.value.filter((n) => n.approved !== false))
 
-// 筛选：类型 / 状态 / 关键词（名称、地址）
+// 筛选：类型 / 状态 / 关键词（名称、地址）——存 localStorage，刷新后保持
+const LS = { type: 'cc.filter.type', status: 'cc.filter.status', q: 'cc.filter.search' }
 const osTypes = ['linux', 'windows', 'nas', 'openwrt', 'darwin', 'pve', 'esxi']
-const typeFilter = ref('all')
-const statusFilter = ref('all')
-const search = ref('')
+const typeFilter = ref(localStorage.getItem(LS.type) || 'all')
+const statusFilter = ref(localStorage.getItem(LS.status) || 'all')
+const search = ref(localStorage.getItem(LS.q) || '')
+watch([typeFilter, statusFilter, search], () => {
+  localStorage.setItem(LS.type, typeFilter.value)
+  localStorage.setItem(LS.status, statusFilter.value)
+  localStorage.setItem(LS.q, search.value)
+})
 
 const filteredNodes = computed(() =>
   visibleNodes.value.filter((n) => {
@@ -157,8 +200,27 @@ const filteredNodes = computed(() =>
   }),
 )
 
+// 按 group_tag 分组：无标签的排最后；全部无标签时只产生一个空 tag 组，模板不渲染标题
+const groupedNodes = computed(() => {
+  const map = new Map()
+  for (const n of filteredNodes.value) {
+    const tag = (n.group_tag || '').trim()
+    if (!map.has(tag)) map.set(tag, [])
+    map.get(tag).push(n)
+  }
+  const groups = [...map.entries()].map(([tag, nodes]) => ({ tag, nodes }))
+  // sort 稳定：有标签的按首次出现顺序，未分组固定在后
+  return groups.sort((a, b) => (a.tag === '' ? 1 : b.tag === '' ? -1 : 0))
+})
+
 // 统一取数：API 节点在 latest 下；mock 数据为扁平字段
 const src = (n) => n.latest || n
+
+// 手动重试（错误条按钮）
+function retryAll() {
+  store.fetchNodes()
+  store.fetchSummary()
+}
 
 const badgeClass = computed(() =>
   mockMode.value ? 'bg-warning/20 text-warning' : connected.value ? 'bg-online/15 text-online' : 'bg-slate-700 text-slate-300',

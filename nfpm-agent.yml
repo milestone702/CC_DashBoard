@@ -4,6 +4,9 @@ name: cc-agent
 arch: "{arch}"
 platform: linux
 version: "{version}"
+# 刻意不配置 release：nfpm 默认对 rpm 使用 release=1（cc-agent-0.2.0-1.x86_64.rpm），
+# 对 deb 不追加 revision（cc-agent_0.2.0_amd64.deb）。显式写 release 会让 deb 也变成
+# cc-agent_0.2.0-1_amd64.deb，反而不干净，因此保持默认。
 section: utils
 priority: optional
 license: MIT

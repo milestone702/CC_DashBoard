@@ -14,14 +14,14 @@ var ErrNotFound = errors.New("not found")
 
 const nodeCols = `id, name, os_type, access_mode, address, port, token, enabled, approved, direction,
 	report_interval, status, last_seen, created_at, auth_enc, sort_order,
-	public_ip, agent_version, agent_goos, agent_arch`
+	public_ip, agent_version, agent_goos, agent_arch, last_error, last_error_at, group_tag, mute_until, agent_mem`
 
 func scanNode(row interface{ Scan(...any) error }) (*model.Node, error) {
 	var n model.Node
 	var enabled, approved int
 	err := row.Scan(&n.ID, &n.Name, &n.OSType, &n.AccessMode, &n.Address, &n.Port,
 		&n.Token, &enabled, &approved, &n.Direction, &n.ReportInterval, &n.Status, &n.LastSeen, &n.CreatedAt, &n.AuthEnc, &n.SortOrder,
-		&n.PublicIP, &n.AgentVersion, &n.AgentGoos, &n.AgentArch)
+		&n.PublicIP, &n.AgentVersion, &n.AgentGoos, &n.AgentArch, &n.LastError, &n.LastErrorAt, &n.GroupTag, &n.MuteUntil, &n.AgentMem)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -79,10 +79,10 @@ func (db *DB) CreateNode(n *model.Node) (int64, error) {
 		n.CreatedAt = time.Now().Unix()
 	}
 	res, err := db.Exec(`INSERT INTO nodes
-		(name, os_type, access_mode, address, port, token, enabled, approved, direction, report_interval, status, last_seen, created_at, auth_enc, sort_order)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM nodes))`,
+		(name, os_type, access_mode, address, port, token, enabled, approved, direction, report_interval, status, last_seen, created_at, auth_enc, sort_order, group_tag)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM nodes), ?)`,
 		n.Name, n.OSType, n.AccessMode, n.Address, n.Port, n.Token,
-		boolInt(n.Enabled), boolInt(n.Approved), orPush(n.Direction), n.ReportInterval, n.Status, n.LastSeen, n.CreatedAt, n.AuthEnc)
+		boolInt(n.Enabled), boolInt(n.Approved), orPush(n.Direction), n.ReportInterval, n.Status, n.LastSeen, n.CreatedAt, n.AuthEnc, n.GroupTag)
 	if err != nil {
 		return 0, err
 	}
@@ -107,9 +107,9 @@ func (db *DB) ReorderNodes(ids []int64) error {
 // UpdateNode 按非 nil 字段部分更新（传入的 n.ID 必填）。
 func (db *DB) UpdateNode(n *model.Node) error {
 	res, err := db.Exec(`UPDATE nodes SET name=?, os_type=?, access_mode=?, address=?, port=?,
-		enabled=?, approved=?, direction=?, report_interval=?, token=?, auth_enc=? WHERE id=?`,
+		enabled=?, approved=?, direction=?, report_interval=?, token=?, auth_enc=?, group_tag=?, mute_until=? WHERE id=?`,
 		n.Name, n.OSType, n.AccessMode, n.Address, n.Port,
-		boolInt(n.Enabled), boolInt(n.Approved), orPush(n.Direction), n.ReportInterval, n.Token, n.AuthEnc, n.ID)
+		boolInt(n.Enabled), boolInt(n.Approved), orPush(n.Direction), n.ReportInterval, n.Token, n.AuthEnc, n.GroupTag, n.MuteUntil, n.ID)
 	if err != nil {
 		return err
 	}
@@ -129,11 +129,13 @@ func (db *DB) DeleteNode(id int64) error {
 	for _, q := range []string{
 		`DELETE FROM nodes WHERE id=?`,
 		`DELETE FROM node_details WHERE node_id=?`,
+		`DELETE FROM node_hardware WHERE node_id=?`,
 		`DELETE FROM metrics_5s WHERE node_id=?`,
 		`DELETE FROM metrics_1m WHERE node_id=?`,
 		`DELETE FROM metrics_1h WHERE node_id=?`,
 		`DELETE FROM alerts WHERE node_id=?`,
 		`DELETE FROM node_events WHERE node_id=?`,
+		`DELETE FROM boot_events WHERE node_id=?`,
 		`DELETE FROM alert_rules WHERE node_id=?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {
@@ -187,10 +189,12 @@ func (db *DB) MarkNodeOffline(id int64) error {
 	return err
 }
 
-// OfflineCandidates 返回已超过 3×上报周期未上报的在线节点。
+// OfflineCandidates 返回可能已离线（超过 3×上报周期未上报，最小 15 秒）的在线节点。
+// 阈值下推到 SQL，避免每 10 秒把全部在线节点捞出来在内存里过滤。
 func (db *DB) OfflineCandidates(now int64) ([]*model.Node, error) {
 	rows, err := db.Query(`SELECT `+nodeCols+` FROM nodes
-		WHERE enabled=1 AND status=? AND last_seen>0 AND last_seen < ?`,
+		WHERE enabled=1 AND status=? AND last_seen>0
+		  AND last_seen < ? - MAX(15, report_interval*3)`,
 		model.StatusOnline, now)
 	if err != nil {
 		return nil, err
@@ -294,6 +298,29 @@ func (db *DB) UpdateNodeAgentMeta(id int64, version, goos, arch string) error {
 // SetNodePublicIP 写入公网 IP（服务端解析的源 IP 或 Agent 上报值）。
 func (db *DB) SetNodePublicIP(id int64, ip string) error {
 	_, err := db.Exec(`UPDATE nodes SET public_ip=? WHERE id=?`, ip, id)
+	return err
+}
+
+// SetNodeError 记录最近一次采集/连接失败原因，供面板解释「为什么离线/没数据」。
+// 采集成功后由 ClearNodeError 清空。
+func (db *DB) SetNodeError(id int64, msg string) error {
+	if r := []rune(msg); len(r) > 200 { // 按字符截断，避免多字节被劈开，也防止异常输出撑爆一行
+		msg = string(r[:200])
+	}
+	_, err := db.Exec(`UPDATE nodes SET last_error=?, last_error_at=? WHERE id=?`,
+		msg, time.Now().Unix(), id)
+	return err
+}
+
+// ClearNodeError 采集成功后清除错误标记（仅在有值时写，减少写放大）。
+func (db *DB) ClearNodeError(id int64) error {
+	_, err := db.Exec(`UPDATE nodes SET last_error='', last_error_at=0 WHERE id=? AND last_error!=''`, id)
+	return err
+}
+
+// SetNodeAgentMem 记录 Agent 自身内存占用（字节）。
+func (db *DB) SetNodeAgentMem(id int64, mem int64) error {
+	_, err := db.Exec(`UPDATE nodes SET agent_mem=? WHERE id=?`, mem, id)
 	return err
 }
 

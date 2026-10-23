@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -165,12 +166,60 @@ func sendOnce(cfg Config, title, content string) error {
 		return postJSON(cfg.URL, wecomBody(title, content))
 	case "smtp":
 		return sendSMTP(cfg, title, content)
+	case "ntfy":
+		return sendNtfy(cfg, title, content)
+	case "telegram":
+		return sendTelegram(cfg, title, content)
 	default: // pushplus
 		if cfg.Token == "" {
 			return errors.New("pushplus token 未配置")
 		}
 		return postJSON("https://www.pushplus.plus/send", pushPlusBody(cfg.Token, title, content))
 	}
+}
+
+// sendNtfy 推送到 ntfy 主题（https://ntfy.sh/<topic> 或自建实例）。
+// 手机装 ntfy App 订阅同一主题即可收到系统通知，无需自建推送服务。
+// URL = 完整主题地址；Token = 可选访问令牌（受保护主题）。
+func sendNtfy(cfg Config, title, content string) error {
+	if cfg.URL == "" {
+		return errors.New("ntfy 主题地址未配置（如 https://ntfy.sh/my-topic）")
+	}
+	body := title + "\n\n" + content
+	req, err := http.NewRequest(http.MethodPost, cfg.URL, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("Title", title) // 通知栏标题；非 ASCII 由 ntfy 按 UTF-8 处理
+	req.Header.Set("Priority", "default")
+	if cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("ntfy 返回 %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// sendTelegram 通过 Bot API 发送（Token=bot token，URL=chat_id）。
+// chat_id 形如 123456789，群组为 -1001234567890。
+func sendTelegram(cfg Config, title, content string) error {
+	if cfg.Token == "" || cfg.URL == "" {
+		return errors.New("telegram 需要 bot Token 与 chat_id")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"chat_id":                  cfg.URL,
+		"text":                     title + "\n\n" + content,
+		"disable_web_page_preview": true,
+	})
+	return postJSON("https://api.telegram.org/bot"+cfg.Token+"/sendMessage", body)
 }
 
 // ---------- 各渠道消息体（纯函数，便于单元测试） ----------
@@ -331,17 +380,17 @@ func buildMail(from string, to []string, subject, body string) []byte {
 // encodeSubject RFC 2047 主题编码（=?UTF-8?B?...?=；纯 ASCII 原样）。
 // 不用 mime.BEncoding：其输出小写 token（=?utf-8?b?），部分老旧客户端不认。
 func encodeSubject(s string) string {
- ascii := true
- for _, r := range s {
-	 if r > 127 {
-		 ascii = false
-		 break
-	 }
- }
- if ascii {
-	 return s
- }
- return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(s)) + "?="
+	ascii := true
+	for _, r := range s {
+		if r > 127 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return s
+	}
+	return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(s)) + "?="
 }
 
 func postJSON(url string, body []byte) error {

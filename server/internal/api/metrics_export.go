@@ -3,6 +3,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,9 +13,20 @@ import (
 )
 
 // handleMetricsExport GET /metrics — Prometheus 抓取端点（text/plain; version=0.0.4）。
-// 暴露全部已批准节点的最新指标；开启访问密码时同样可访问（Prometheus 无会话），
-// 公网部署请在反代层限制来源（见 docs/使用部署手册.md 反代章节）。
+// 暴露全部已批准节点的最新指标。
+// 鉴权：默认开放（兼容已有 Prometheus 配置）；若在面板里设置了抓取令牌，
+// 则要求 ?token= 或 Authorization: Bearer 匹配，防止公网裸奔泄露节点名与指标。
 func (s *Server) handleMetricsExport(c *gin.Context) {
+	if want, ok, _ := s.db.GetSetting(setMetricsToken); ok && want != "" {
+		got := c.Query("token")
+		if got == "" {
+			got = bearerToken(c)
+		}
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			fail(c, http.StatusUnauthorized, "invalid metrics token")
+			return
+		}
+	}
 	nodes, err := s.db.ListNodes()
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
@@ -43,6 +55,8 @@ func (s *Server) handleMetricsExport(c *gin.Context) {
 	b.WriteString("# TYPE cc_node_disk_read_bytes_per_second gauge\n")
 	b.WriteString("# HELP cc_node_disk_write_bytes_per_second 磁盘写速率 Bytes/s\n")
 	b.WriteString("# TYPE cc_node_disk_write_bytes_per_second gauge\n")
+	b.WriteString("# HELP cc_node_temp_max 最高温度 ℃（0=该节点无温度传感器）\n")
+	b.WriteString("# TYPE cc_node_temp_max gauge\n")
 
 	online := 0
 	for _, n := range nodes {
@@ -61,7 +75,7 @@ func (s *Server) handleMetricsExport(c *gin.Context) {
 			continue
 		}
 		fmt.Fprintf(&b, "cc_node_cpu_percent{%s} %g\n", labels, sample.CPU)
-		fmt.Fprintf(&b, "cc_node_mem_percent{%s} %g\n", labels, sample.MemPct())
+		fmt.Fprintf(&b, "cc_node_mem_percent{%s} %g\n", labels, sample.MemUsedPct())
 		fmt.Fprintf(&b, "cc_node_disk_percent{%s} %g\n", labels, sample.DiskPct)
 		fmt.Fprintf(&b, "cc_node_load1{%s} %g\n", labels, sample.Load1)
 		fmt.Fprintf(&b, "cc_node_net_rx_bytes_per_second{%s} %d\n", labels, sample.NetRx)
@@ -69,6 +83,7 @@ func (s *Server) handleMetricsExport(c *gin.Context) {
 		fmt.Fprintf(&b, "cc_node_uptime_seconds{%s} %d\n", labels, sample.Uptime)
 		fmt.Fprintf(&b, "cc_node_disk_read_bytes_per_second{%s} %d\n", labels, sample.DiskRead)
 		fmt.Fprintf(&b, "cc_node_disk_write_bytes_per_second{%s} %d\n", labels, sample.DiskWrite)
+		fmt.Fprintf(&b, "cc_node_temp_max{%s} %g\n", labels, sample.TempMax)
 	}
 	fmt.Fprintf(&b, "# HELP cc_scrape_nodes_total 抓取到的已批准节点数\n# TYPE cc_scrape_nodes_total gauge\ncc_scrape_nodes_total %d\n", len(nodes))
 

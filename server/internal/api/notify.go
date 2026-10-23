@@ -14,15 +14,15 @@ import (
 func (s *Server) handleGetNotifyConfig(c *gin.Context) {
 	cfg := notify.Load(s.db)
 	c.JSON(http.StatusOK, gin.H{
-		"enabled":   cfg.Enabled,
-		"channel":   cfg.Channel,
-		"token_set": cfg.Token != "",
-		"url_set":   cfg.URL != "",
-		"smtp_host": cfg.SMTPHost,
-		"smtp_port": cfg.SMTPPort,
-		"smtp_user": cfg.SMTPUser,
-		"smtp_from": cfg.SMTPFrom,
-		"smtp_to":   cfg.SMTPTo,
+		"enabled":       cfg.Enabled,
+		"channel":       cfg.Channel,
+		"token_set":     cfg.Token != "",
+		"url_set":       cfg.URL != "",
+		"smtp_host":     cfg.SMTPHost,
+		"smtp_port":     cfg.SMTPPort,
+		"smtp_user":     cfg.SMTPUser,
+		"smtp_from":     cfg.SMTPFrom,
+		"smtp_to":       cfg.SMTPTo,
 		"smtp_pass_set": cfg.SMTPPass != "",
 	})
 }
@@ -46,9 +46,9 @@ func (s *Server) handlePutNotifyConfig(c *gin.Context) {
 		return
 	}
 	switch body.Channel {
-	case "pushplus", "webhook", "feishu", "dingtalk", "wecom", "smtp":
+	case "pushplus", "webhook", "feishu", "dingtalk", "wecom", "smtp", "ntfy", "telegram":
 	default:
-		fail(c, http.StatusBadRequest, "channel: pushplus|webhook|feishu|dingtalk|wecom|smtp")
+		fail(c, http.StatusBadRequest, "channel: pushplus|webhook|feishu|dingtalk|wecom|smtp|ntfy|telegram")
 		return
 	}
 	cfg := notify.Load(s.db)

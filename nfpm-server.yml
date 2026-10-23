@@ -4,6 +4,8 @@ name: cc-dashboard
 arch: "{arch}"
 platform: linux
 version: "{version}"
+# 不显式配置 release：rpm 默认 release=1（cc-dashboard-0.2.0-1.x86_64.rpm），deb 不追加 revision
+# （cc-dashboard_0.2.0_amd64.deb）。显式写 release 会连带 deb 也带 -1。
 section: net
 priority: optional
 license: MIT

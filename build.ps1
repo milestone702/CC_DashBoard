@@ -18,18 +18,30 @@ if (Test-Path $verFile) {
     if ($lastVer) { $lastVer = $lastVer.Trim() }
 }
 if ($lastVer -notmatch '^V?\d') {
-    # 首次（无 VERSION 文件）：以 git 提交数作种子 V0.{提交数}，无 git 则 V0.1
+    # 首次（无 VERSION 文件）：以 git 提交数作种子 V0.{提交数}.0，无 git 则 V0.1.0
     $seed = 1
     try {
         $c = git rev-list --count HEAD 2>$null
         if ($LASTEXITCODE -eq 0 -and $c) { $seed = [int]$c.Trim() }
     } catch { }
-    $lastVer = "V0.$seed"
+    $lastVer = "V0.$seed.0"
+}
+# 版本号统一三段式：旧文件里的 V0.2 / V2 读取时补足为 V0.2.0 / V2.0.0，随后写回也是三段
+if ($lastVer -match '^[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?$') {
+    $vmaj = [int]$Matches[1]
+    $vmin = 0; $vpat = 0
+    if (-not [string]::IsNullOrEmpty($Matches[2])) { $vmin = [int]$Matches[2] }
+    if (-not [string]::IsNullOrEmpty($Matches[3])) { $vpat = [int]$Matches[3] }
+    $lastVer = "V$vmaj.$vmin.$vpat"
 }
 function Get-NextPatch([string]$v) {
-    # V0.3 → V0.4（末位 +1，即 +0.1）；V1 → V2.0；无法解析（如 V1.2.3）则原样返回
-    if ($v -match '^V?(\d+)\.(\d+)$') { return ('V{0}.{1}' -f [int]$Matches[1], ([int]$Matches[2] + 1)) }
-    if ($v -match '^V?(\d+)$') { return ('V{0}.0' -f ([int]$Matches[1] + 1)) }
+    # 三段式：次版本 +1、补丁归零，如 V0.2.0 → V0.3.0（每次构建升一个次版本）
+    if ($v -match '^V?(\d+)\.(\d+)\.(\d+)$') {
+        return ('V{0}.{1}.0' -f [int]$Matches[1], ([int]$Matches[2] + 1))
+    }
+    # 旧的两段写法（V0.2）：视为 V0.2.0 后按同样规则递增 → V0.3.0
+    if ($v -match '^V?(\d+)\.(\d+)$') { return ('V{0}.{1}.0' -f [int]$Matches[1], ([int]$Matches[2] + 1)) }
+    if ($v -match '^V?(\d+)$') { return ('V{0}.0.0' -f ([int]$Matches[1] + 1)) }
     return $v
 }
 $defaultNext = Get-NextPatch $lastVer
@@ -43,7 +55,7 @@ if ($Version) {
 } else {
     Write-Host "[0/5] 上次版本: $lastVer"
     while ($true) {
-        $ans = Read-Host "输入本次版本号（回车 = $defaultNext 自动 +0.1；升大版本请输入，如 V2.0）"
+        $ans = Read-Host "输入本次版本号（回车 = $defaultNext，次版本 +1；升主版本请输入，如 V2）"
         if (-not $ans) { $version = $defaultNext; break }
         $ans = $ans.Trim()
         if ($ans -notmatch '^[vV]?\d+(\.\d+){0,2}$') { Write-Host "  格式无效，示例: V1.0 / V2 / V2.3.1"; continue }
@@ -51,11 +63,22 @@ if ($Version) {
         break
     }
 }
+# 统一补足三段后写回（手填 V2.0 → V2.0.0），保证 VERSION 文件与产物命名一致
+if ($version -match '^[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?$') {
+    $vmaj = [int]$Matches[1]
+    $vmin = 0; $vpat = 0
+    if (-not [string]::IsNullOrEmpty($Matches[2])) { $vmin = [int]$Matches[2] }
+    if (-not [string]::IsNullOrEmpty($Matches[3])) { $vpat = [int]$Matches[3] }
+    $version = "V$vmaj.$vmin.$vpat"
+}
 Set-Content -Path $verFile -Value $version -Encoding ASCII
 $pkgVersion = $version -replace '^[vV]', ''
-# goversioninfo 字符串版本要求 x.y.z 形式，补足三位（仅影响 exe 属性展示，消除构建警告）
+# 版本号统一为三段式（V0.2 → 0.2.0）：deb/rpm 规范要求 x.y.z，nfpm 会自动补零。
+# 若不统一，裸二进制/ipk 会是 0.2、deb/rpm 是 0.2.0，同一版本出现两种写法。
+# VERSION 文件本身仍保持两段（V0.2），这样「回车 +0.1」的自动递增才有效。
+if (($pkgVersion -split '\.').Count -lt 3) { $pkgVersion = "$pkgVersion.0" }
+# goversioninfo 字符串版本同样要求 x.y.z
 $viVer = $pkgVersion
-if (($viVer -split '\.').Count -lt 3) { $viVer = "$viVer.0" }
 Write-Host "[0/5] 版本号: $version（上次 $lastVer，打包用 $pkgVersion）"
 $ldflags = "-s -w -X main.version=$version"
 
@@ -89,6 +112,11 @@ New-Item -ItemType File -Force -Path "server\internal\webui\dist\.gitkeep" | Out
 
 Write-Host "[3/5] 构建服务端（单二进制，内嵌前端）..."
 New-Item -ItemType Directory -Force -Path build | Out-Null
+# 清理上一轮的裸二进制与 ipk（每次构建都会重新生成，避免 0.2 / 0.2.0 两种命名并存）；
+# deb/rpm 保留——nfpm 未安装时不会重建，删掉就丢了
+Get-ChildItem build -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^cc-(agent|server|dashboard)-' -and ($_.Name -match '\.ipk$' -or $_.Name -match '(linux|windows)-') } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 $env:CGO_ENABLED = "0"
 $gvSrv = Get-Goversioninfo
 if ($gvSrv -and (Test-Path $iconIco)) {
@@ -103,10 +131,10 @@ if ($gvSrv -and (Test-Path $iconIco)) {
 }
 Push-Location server
 $serverTargets = @(
-    @{ GOOS = "windows"; GOARCH = "amd64"; Out = "..\build\cc-server-windows-amd64.exe" },
-    @{ GOOS = "linux"; GOARCH = "amd64"; Out = "..\build\cc-server-linux-amd64" },
-    @{ GOOS = "linux"; GOARCH = "arm64"; Out = "..\build\cc-server-linux-arm64" },
-    @{ GOOS = "linux"; GOARCH = "arm"; GOARM = "7"; Out = "..\build\cc-server-linux-armv7" }
+    @{ GOOS = "windows"; GOARCH = "amd64"; Out = "..\build\cc-dashboard-$pkgVersion-windows-amd64.exe" },
+    @{ GOOS = "linux"; GOARCH = "amd64"; Out = "..\build\cc-dashboard-$pkgVersion-linux-amd64" },
+    @{ GOOS = "linux"; GOARCH = "arm64"; Out = "..\build\cc-dashboard-$pkgVersion-linux-arm64" },
+    @{ GOOS = "linux"; GOARCH = "arm"; GOARM = "7"; Out = "..\build\cc-dashboard-$pkgVersion-linux-armv7" }
 )
 foreach ($t in $serverTargets) {
     $env:GOOS = $t.GOOS
@@ -132,12 +160,12 @@ if ($gvAgent -and (Test-Path $iconIco)) {
 }
 Push-Location agent-go
 $agentTargets = @(
-    @{ GOOS = "windows"; GOARCH = "amd64"; Out = "..\build\cc-agent-windows-amd64.exe" },
-    @{ GOOS = "linux"; GOARCH = "amd64"; Out = "..\build\cc-agent-linux-amd64" },
-    @{ GOOS = "linux"; GOARCH = "arm64"; Out = "..\build\cc-agent-linux-arm64" },
-    @{ GOOS = "linux"; GOARCH = "arm"; GOARM = "7"; Out = "..\build\cc-agent-linux-armv7" },
+    @{ GOOS = "windows"; GOARCH = "amd64"; Out = "..\build\cc-agent-$pkgVersion-windows-amd64.exe" },
+    @{ GOOS = "linux"; GOARCH = "amd64"; Out = "..\build\cc-agent-$pkgVersion-linux-amd64" },
+    @{ GOOS = "linux"; GOARCH = "arm64"; Out = "..\build\cc-agent-$pkgVersion-linux-arm64" },
+    @{ GOOS = "linux"; GOARCH = "arm"; GOARM = "7"; Out = "..\build\cc-agent-$pkgVersion-linux-armv7" },
     # GOMIPS=softfloat 必须显式指定：OpenWrt mipsel_24kc（24Kc 无 FPU），默认 hardfloat 会 SIGILL
-    @{ GOOS = "linux"; GOARCH = "mipsle"; GOMIPS = "softfloat"; Out = "..\build\cc-agent-linux-mipsle" }
+    @{ GOOS = "linux"; GOARCH = "mipsle"; GOMIPS = "softfloat"; Out = "..\build\cc-agent-$pkgVersion-linux-mipsle" }
 )
 foreach ($t in $agentTargets) {
     $env:GOOS = $t.GOOS
@@ -155,10 +183,10 @@ Write-Host "[5/5] 打包（ipk / deb / rpm，可选）..."
 Remove-Item env:GOOS, env:GOARCH, env:GOARM, env:GOMIPS -ErrorAction SilentlyContinue
 # ipk（OpenWrt）：使用 tools/mkipk 纯 Go 构建（包内含 init.d + postinst，装完自动注册开机自启）
 $ipkMap = [ordered]@{
-    'cc-agent-linux-mipsle' = 'mipsel_24kc'
-    'cc-agent-linux-armv7'  = 'arm_cortex-a7'
-    'cc-agent-linux-arm64'  = 'aarch64_cortex-a53'
-    'cc-agent-linux-amd64'  = 'x86_64'
+    "cc-agent-$pkgVersion-linux-mipsle" = 'mipsel_24kc'
+    "cc-agent-$pkgVersion-linux-armv7"  = 'arm_cortex-a7'
+    "cc-agent-$pkgVersion-linux-arm64"  = 'aarch64_cortex-a53'
+    "cc-agent-$pkgVersion-linux-amd64"  = 'x86_64'
 }
 foreach ($k in $ipkMap.Keys) {
     $bin = Join-Path $PSScriptRoot "build\$k"
@@ -179,7 +207,7 @@ if (Get-Command nfpm -ErrorAction SilentlyContinue) {
     # --- Agent 包（unit + postinstall 自动注册）---
     # 显式 UTF-8 读取：PS5.1 默认按 ANSI(GBK) 读无 BOM 文件会吞中文后的换行，破坏 YAML（T-15 实测）
     $tmpl = [IO.File]::ReadAllText((Join-Path $root 'nfpm-agent.yml'), [Text.Encoding]::UTF8)
-    $pairs = @(@{ b = 'cc-agent-linux-amd64'; a = 'amd64' }, @{ b = 'cc-agent-linux-arm64'; a = 'arm64' })
+    $pairs = @(@{ b = "cc-agent-$pkgVersion-linux-amd64"; a = 'amd64' }, @{ b = "cc-agent-$pkgVersion-linux-arm64"; a = 'arm64' })
     foreach ($p in $pairs) {
         $binPath = Join-Path $root "build\$($p.b)"
         if (-not (Test-Path $binPath)) { continue }
@@ -199,7 +227,7 @@ if (Get-Command nfpm -ErrorAction SilentlyContinue) {
     }
     # --- 服务端包（master deb/rpm，装完即启动）---
     $tmplS = [IO.File]::ReadAllText((Join-Path $root 'nfpm-server.yml'), [Text.Encoding]::UTF8)
-    $sPairs = @(@{ b = 'cc-server-linux-amd64'; a = 'amd64' }, @{ b = 'cc-server-linux-arm64'; a = 'arm64' })
+    $sPairs = @(@{ b = "cc-dashboard-$pkgVersion-linux-amd64"; a = 'amd64' }, @{ b = "cc-dashboard-$pkgVersion-linux-arm64"; a = 'arm64' })
     foreach ($p in $sPairs) {
         $binPath = Join-Path $root "build\$($p.b)"
         if (-not (Test-Path $binPath)) { continue }

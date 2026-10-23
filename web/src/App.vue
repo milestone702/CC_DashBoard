@@ -1,26 +1,29 @@
 <template>
   <div class="min-h-screen">
     <header class="sticky top-0 z-10 border-b border-slate-800 bg-slate-900/80 backdrop">
-      <div class="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3">
-        <h1 class="text-lg font-semibold tracking-wide text-emerald-400">{{ siteTitle }}</h1>
-        <nav class="flex gap-4 text-sm">
+      <div
+        class="mx-auto flex max-w-7xl flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5 sm:gap-x-6 sm:px-4 sm:py-3"
+      >
+        <h1 class="text-base font-semibold tracking-wide text-emerald-400 sm:text-lg">{{ siteTitle }}</h1>
+        <!-- 手机端导航独占一行且可横向滚动；桌面恢复为内联 -->
+        <nav class="order-3 -mx-1 flex w-full gap-1 overflow-x-auto px-1 text-sm sm:order-none sm:mx-0 sm:w-auto sm:gap-4 sm:overflow-visible sm:px-0">
           <router-link
             v-for="item in visibleNavs"
             :key="item.path"
             :to="item.path"
-            class="rounded px-3 py-1.5 text-slate-300 hover:bg-slate-800"
+            class="shrink-0 rounded px-2.5 py-1.5 text-slate-300 hover:bg-slate-800 sm:px-3"
             active-class="!bg-slate-800 !text-emerald-400"
           >
             {{ item.title }}
           </router-link>
         </nav>
-        <div class="ml-auto flex items-center gap-3 text-xs">
-          <span v-if="auth.authed" class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-400">
+        <div class="ml-auto flex items-center gap-2 text-xs sm:gap-3">
+          <span v-if="auth.authed" class="rounded-full bg-slate-800 px-2 py-1 text-slate-400 sm:px-2.5">
             {{ auth.isAdmin ? '管理员' : '访客' }}
           </span>
           <button
             v-if="auth.authed"
-            class="rounded bg-slate-800 px-2.5 py-1 text-slate-300 hover:bg-slate-700"
+            class="rounded bg-slate-800 px-2 py-1 text-slate-300 hover:bg-slate-700 sm:px-2.5"
             @click="onLogout"
           >
             退出
@@ -31,7 +34,7 @@
         </div>
       </div>
     </header>
-    <main class="mx-auto max-w-7xl px-4 py-6">
+    <main class="mx-auto max-w-7xl px-3 pb-[env(safe-area-inset-bottom)] pt-4 sm:px-4 sm:py-6">
       <router-view />
     </main>
   </div>
@@ -46,6 +49,7 @@ import { siteTitle, loadSiteTitle } from './site'
 
 const allNavs = [
   { path: '/', title: '全局概览' },
+  { path: '/alerts', title: '告警' },
   { path: '/admin', title: '节点管理', admin: true },
 ]
 

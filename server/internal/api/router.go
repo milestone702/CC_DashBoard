@@ -23,38 +23,58 @@ import (
 
 // Server 持有各 handler 共享依赖。
 type Server struct {
-	db       *store.DB
-	key      []byte // AES-256-GCM 主密钥
-	hub      *Hub
-	engine   *alert.Engine
-	authm    *auth.Manager // 用户会话签发/校验
-	upgrader websocket.Upgrader
-	livesMu  sync.RWMutex // 实时明细缓存
-	lives    map[int64]json.RawMessage
-	upMu         sync.Mutex        // 手动升级标记
-	upgradeForce map[int64]bool    // 节点 ID → 下次上报强制下发 upgrade 指令
+	db           *store.DB
+	key          []byte // AES-256-GCM 主密钥
+	hub          *Hub
+	engine       *alert.Engine
+	authm        *auth.Manager // 用户会话签发/校验
+	limiter      *loginLimiter // 登录失败限流
+	upgrader     websocket.Upgrader
+	livesMu      sync.RWMutex // 实时明细缓存
+	lives        map[int64]json.RawMessage
+	upMu         sync.Mutex     // 手动升级标记
+	upgradeForce map[int64]bool // 节点 ID → 下次上报强制下发 upgrade 指令
+	rollupMu     sync.Mutex     // 查询侧降采样节流
+	lastRollup   int64          // 上次降采样的 Unix 秒
 }
 
 // NewRouter 组装全部路由。返回 (路由, 服务实例)——服务实例用于注入 live 缓存回调。
 func NewRouter(db *store.DB, key []byte, hub *Hub, engine *alert.Engine, webDir string) (*gin.Engine, *Server) {
 	s := &Server{
-		db:     db,
-		key:    key,
-		hub:    hub,
-		engine: engine,
-		authm:  auth.NewManager(key),
-		lives:  map[int64]json.RawMessage{},
+		db:           db,
+		key:          key,
+		hub:          hub,
+		engine:       engine,
+		authm:        auth.NewManager(key),
+		limiter:      newLoginLimiter(),
+		lives:        map[int64]json.RawMessage{},
 		upgradeForce: map[int64]bool{},
 		upgrader: websocket.Upgrader{
-			// 面板登录（二期）前保持宽松，供局域网前端接入
-			CheckOrigin: func(*http.Request) bool { return true },
+			// 浏览器握手会带 Origin：要求与 Host 同源（防 WS 跨站劫持）；
+			// 原生客户端（App / 脚本）不发送 Origin，直接放行。
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					return true
+				}
+				u, err := url.Parse(origin)
+				if err != nil || u.Host == "" {
+					return false
+				}
+				host := r.Host
+				if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+					host = strings.TrimSpace(strings.Split(fh, ",")[0])
+				}
+				return u.Host == host
+			},
 		},
 	}
 
 	r := gin.Default()
 	r.Use(corsMiddleware)
+	r.Use(gzipMiddleware()) // 移动网络下显著减少传输量
 
-	v1 := r.Group("/api/v1", csrfGuard())
+	v1 := r.Group("/api/v1", csrfGuard(), s.auditMiddleware())
 	{
 		// ---- 公开：机器上报 / 自注册 / 用户认证 ----
 		v1.POST("/report", s.handleReport)
@@ -62,9 +82,10 @@ func NewRouter(db *store.DB, key []byte, hub *Hub, engine *alert.Engine, webDir 
 		v1.GET("/auth/status", s.handleAuthStatus)
 		v1.GET("/site", s.handleGetSite)
 		v1.GET("/auth/whoami", s.handleWhoami)
-		v1.POST("/auth/setup", s.handleSetup)
-		v1.POST("/auth/login", s.handleLogin)
+		v1.POST("/auth/setup", s.loginGuard(), s.handleSetup)
+		v1.POST("/auth/login", s.loginGuard(), s.handleLogin)
 		v1.POST("/auth/logout", s.handleLogout)
+		v1.POST("/auth/refresh", s.handleRefresh)
 
 		// ---- 管理员会话 ----
 		v1.POST("/auth/password", s.requireAdmin, s.handleChangePassword)
@@ -74,6 +95,20 @@ func NewRouter(db *store.DB, key []byte, hub *Hub, engine *alert.Engine, webDir 
 		v1.PUT("/auth/view", s.requireAdmin, s.handlePutViewSettings)
 		v1.GET("/auth/join-key", s.requireAdmin, s.handleGetJoinKey)
 		v1.POST("/auth/join-key/rotate", s.requireAdmin, s.handleRotateJoinKey)
+
+		// Prometheus 抓取令牌（可选；设置后 /metrics 需带 token）
+		v1.GET("/auth/metrics-token", s.requireAdmin, s.handleGetMetricsToken)
+		v1.PUT("/auth/metrics-token", s.requireAdmin, s.handleSetMetricsToken)
+
+		// API Key（Bearer 通道）：App / 脚本等非浏览器客户端凭证
+		v1.GET("/auth/api-key", s.requireAdmin, s.handleGetAPIKey)
+		v1.POST("/auth/api-key/rotate", s.requireAdmin, s.handleRotateAPIKey)
+		v1.DELETE("/auth/api-key", s.requireAdmin, s.handleDeleteAPIKey)
+
+		// 多凭证管理（每台设备/脚本一条，互不影响）
+		v1.GET("/auth/api-keys", s.requireAdmin, s.handleListAPIKeys)
+		v1.POST("/auth/api-keys", s.requireAdmin, s.handleCreateAPIKey)
+		v1.DELETE("/auth/api-keys/:id", s.requireAdmin, s.handleDeleteAPIKeyByID)
 
 		// 告警通知配置（管理员）
 		v1.GET("/notify/config", s.requireAdmin, s.handleGetNotifyConfig)
@@ -91,7 +126,7 @@ func NewRouter(db *store.DB, key []byte, hub *Hub, engine *alert.Engine, webDir 
 		v1.GET("/nodes/:id/install-script", s.requireAdmin, s.handleInstallScript)
 		v1.GET("/alerts", s.requireView, s.handleListAlerts)
 		v1.GET("/alerts/rules", s.requireView, s.handleListRules)
-		v1.GET("/ws", s.requireView, s.handleWebSocket)
+		v1.GET("/ws", s.requireViewWS, s.handleWebSocket)
 
 		// ---- 管理员写接口 ----
 		v1.POST("/nodes", s.requireAdmin, s.handleCreateNode)
@@ -102,6 +137,13 @@ func NewRouter(db *store.DB, key []byte, hub *Hub, engine *alert.Engine, webDir 
 		v1.POST("/alerts/rules", s.requireAdmin, s.handleCreateRule)
 		v1.PUT("/alerts/rules/:id", s.requireAdmin, s.handleUpdateRule)
 		v1.DELETE("/alerts/rules/:id", s.requireAdmin, s.handleDeleteRule)
+
+		// 配置导出 / 恢复（不含 Token / 凭据 / 密钥；恢复只新增不覆盖）
+		v1.GET("/backup", s.requireAdmin, s.handleBackupExport)
+		v1.POST("/restore", s.requireAdmin, s.handleRestore)
+
+		// 操作审计（管理员写操作的追溯记录）
+		v1.GET("/audit", s.requireAdmin, s.handleListAudit)
 
 		// ---- 程序池（管理端 CRUD + OTA 开关；下载走节点 Token）----
 		v1.GET("/pool", s.requireAdmin, s.handlePoolList)
@@ -116,6 +158,8 @@ func NewRouter(db *store.DB, key []byte, hub *Hub, engine *alert.Engine, webDir 
 
 	// Prometheus 指标导出（根路径惯例；反代公网部署时于代理层限制来源）
 	r.GET("/metrics", s.handleMetricsExport)
+	// 健康检查（容器探针 / 反代上游检测）
+	r.GET("/healthz", s.handleHealthz)
 	return r, s
 }
 
@@ -170,6 +214,8 @@ func mountEmbedded(r *gin.Engine) {
 		if strings.HasPrefix(p, "/assets/") {
 			name := strings.TrimPrefix(p, "/")
 			if data, rerr := fs.ReadFile(fsys, name); rerr == nil {
+				// 文件名带内容 hash，可长期缓存（移动端二次访问几乎零流量）
+				c.Header("Cache-Control", "public, max-age=31536000, immutable")
 				c.Data(http.StatusOK, mimeByExt(filepath.Ext(p)), data)
 				return
 			}
@@ -178,10 +224,13 @@ func mountEmbedded(r *gin.Engine) {
 		if !strings.Contains(strings.TrimPrefix(p, "/"), "/") && strings.Contains(filepath.Base(p), ".") {
 			name := strings.TrimPrefix(p, "/")
 			if data, rerr := fs.ReadFile(fsys, name); rerr == nil {
+				c.Header("Cache-Control", "public, max-age=86400")
 				c.Data(http.StatusOK, mimeByExt(filepath.Ext(p)), data)
 				return
 			}
 		}
+		// 入口 HTML 必须每次校验，否则发新版后移动端会一直用旧缓存
+		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", index)
 	})
 	log.Printf("嵌入前端已启用（单二进制模式）")
@@ -216,11 +265,16 @@ func mimeByExt(ext string) string {
 // csrfGuard CSRF 显式防护（T-12）：非简单方法（POST/PUT/DELETE/PATCH）若携带 Origin 头，
 // 必须与请求 Host 同源，否则 403。无 Origin（curl / Agent 上报 / 原生客户端）放行——
 // 配合会话 Cookie 的 SameSite=Lax（双保险）：跨站表单即便发出也拿不到会话。
+// 携 Bearer API Key 的请求直接放行：该凭证由客户端显式设置，浏览器不会自动附带，天然免疫 CSRF。
 // 反代部署时 Host 为代理转发的虚拟主机名，Origin 与之一致，行为不变。
 func csrfGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		switch c.Request.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
+		if bearerToken(c) != "" {
 			c.Next()
 			return
 		}
@@ -243,7 +297,7 @@ func csrfGuard() gin.HandlerFunc {
 
 func corsMiddleware(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
-	c.Header("Access-Control-Allow-Headers", "Content-Type, X-CC-Node-Token")
+	c.Header("Access-Control-Allow-Headers", "Content-Type, X-CC-Node-Token, Authorization")
 	c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	if c.Request.Method == http.MethodOptions {
 		c.AbortWithStatus(http.StatusNoContent)

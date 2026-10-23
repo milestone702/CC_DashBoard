@@ -51,8 +51,8 @@ func (s *Server) handlePoolList(c *gin.Context) {
 		items = []*model.PoolItem{}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"items":         items,
-		"ota_enabled":   s.otaEnabled(),
+		"items":          items,
+		"ota_enabled":    s.otaEnabled(),
 		"server_version": Version,
 	})
 }
@@ -313,7 +313,7 @@ var (
 	rePoolDeb = regexp.MustCompile(`^cc-(agent|dashboard)_([^_]+)_(amd64|arm64)\.deb$`)
 	rePoolRpm = regexp.MustCompile(`^cc-(agent|dashboard)-(.+?)-1\.(x86_64|aarch64)\.rpm$`)
 	rePoolIpk = regexp.MustCompile(`^cc-agent-(.+?)-(mipsel_24kc|arm_cortex-a7|aarch64_cortex-a53|x86_64)\.ipk$`)
-	rePoolRaw = regexp.MustCompile(`^cc-(agent|server|dashboard)-(linux|windows)-(amd64|arm64|armv7|mipsle)(\.exe)?$`)
+	rePoolRaw = regexp.MustCompile(`^cc-(agent|server|dashboard)-(?:[vV]?([0-9][0-9.]*)-)?(linux|windows)-(amd64|arm64|armv7|mipsle)(\.exe)?$`)
 )
 
 type poolParsed struct {
@@ -354,7 +354,8 @@ func parsePoolFilename(name string) (poolParsed, bool) {
 		return poolParsed{Component: "agent", GOOS: "linux", Arch: arch, Format: "ipk", Version: m[1]}, true
 	}
 	if m := rePoolRaw.FindStringSubmatch(base); m != nil {
-		return poolParsed{Component: poolComponentOf(m[1]), GOOS: m[2], Arch: m[3], Format: "bin"}, true
+		// m[2] 为可选版本段（裸二进制可能带版本，如 cc-agent-0.2-linux-amd64）
+		return poolParsed{Component: poolComponentOf(m[1]), GOOS: m[3], Arch: m[4], Format: "bin", Version: m[2]}, true
 	}
 	return poolParsed{}, false
 }

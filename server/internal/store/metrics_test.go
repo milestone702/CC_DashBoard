@@ -133,6 +133,10 @@ func TestInsertAggregateHistory(t *testing.T) {
 	if latest.DiskRead != 2100 || latest.DiskWrite != 3100 {
 		t.Errorf("latest io = %d/%d, want 2100/3100", latest.DiskRead, latest.DiskWrite)
 	}
+	// node_id 需回填（metricCols 不含该列，曾恒为 0）
+	if latest.NodeID != id {
+		t.Errorf("latest node_id = %d, want %d", latest.NodeID, id)
+	}
 	if len(latest.PerCPU) != 2 || latest.PerCPU[0] != 11 || latest.PerCPU[1] != 12 {
 		t.Errorf("latest per_cpu = %v, want [11 12]", latest.PerCPU)
 	}
@@ -160,15 +164,31 @@ func TestNodeStatusAndAlerts(t *testing.T) {
 	}
 
 	// 阈值告警 fire → resolve
-	if err := db.InsertAlert(id, "cpu", "warning", 95.5); err != nil {
+	created, err := db.InsertAlert(id, "cpu", "warning", 95.5)
+	if err != nil {
 		t.Fatalf("insert alert: %v", err)
+	}
+	if !created {
+		t.Fatal("首次插入告警应返回 created=true")
+	}
+	// 同一节点同一指标重复插入应被唯一索引拦截（并发上报不产生重复 firing）
+	if dup, _ := db.InsertAlert(id, "cpu", "warning", 96); dup {
+		t.Fatal("重复 firing 告警应返回 created=false")
 	}
 	firing, _ := db.FiringAlertNodes()
 	if !firing[id] {
 		t.Fatal("firing 节点集合应包含该节点")
 	}
-	if err := db.ResolveAlert(id, "cpu"); err != nil {
+	// 首次 resolve 应有变更；再 resolve 同一告警应返回 false（不再重复发恢复通知）
+	resolved, err := db.ResolveAlert(id, "cpu")
+	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	if !resolved {
+		t.Fatal("首次 resolve 应返回 changed=true")
+	}
+	if again, _ := db.ResolveAlert(id, "cpu"); again {
+		t.Fatal("重复 resolve 应返回 changed=false")
 	}
 	firing, _ = db.FiringAlertNodes()
 	if firing[id] {

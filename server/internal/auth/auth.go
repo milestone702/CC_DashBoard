@@ -98,6 +98,31 @@ func Allows(actual, need string) bool {
 	return actual == need
 }
 
+// ---------- 机器 API Key（Bearer 通道，供 App / 脚本等非浏览器客户端）----------
+
+// APIKeyPrefix API Key 固定前缀：便于在日志与配置中识别凭证类型。
+const APIKeyPrefix = "cck_"
+
+// NewAPIKey 生成 API Key：cck_ + 32 字节随机数的十六进制。
+func NewAPIKey() string {
+	return APIKeyPrefix + RandomHex(32)
+}
+
+// HashAPIKey API Key 的存储形式（SHA-256 十六进制）。
+// Key 本身是高熵随机串，无需 bcrypt 慢哈希；且每请求都要校验，须保持廉价。
+func HashAPIKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// CheckAPIKey 校验明文 Key 与存储哈希是否匹配（常量时间比较，避免计时侧信道）。
+func CheckAPIKey(storedHash, provided string) bool {
+	if storedHash == "" || provided == "" {
+		return false
+	}
+	return hmac.Equal([]byte(HashAPIKey(provided)), []byte(storedHash))
+}
+
 func (m *Manager) sign(payload string) string {
 	h := hmac.New(sha256.New, m.key)
 	h.Write([]byte(payload))

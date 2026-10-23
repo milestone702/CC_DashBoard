@@ -83,10 +83,12 @@ func (m *Manager) pullPVE(n *model.Node) {
 	creds, err := m.decryptCreds(n)
 	if err != nil {
 		log.Printf("PVE[%s] 凭据解密失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("凭据解密失败: %v", err))
 		return
 	}
 	if creds.Username == "" || creds.NodeName == "" {
 		log.Printf("PVE[%s] 未配置 API Token 标识或节点名", n.Name)
+		_ = m.db.SetNodeError(n.ID, "未配置 API Token 标识或节点名")
 		return
 	}
 	port := n.Port
@@ -103,6 +105,7 @@ func (m *Manager) pullPVE(n *model.Node) {
 	status, vms, err := fetchPVE(pveHTTPClient, base, auth, creds.NodeName)
 	if err != nil {
 		log.Printf("PVE[%s] 请求失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("PVE API 请求失败: %v", err))
 		return
 	}
 
@@ -133,7 +136,7 @@ func (m *Manager) pullPVE(n *model.Node) {
 	live := map[string]any{
 		"ts": nowT.Unix(), "cpu_total": sample.CPU,
 		"per_cpu": []float64{},
-		"load1": load1, "load5": load5, "load15": load15,
+		"load1":   load1, "load5": load5, "load15": load15,
 		"mem": map[string]any{
 			"total": sample.MemTotal, "used": sample.MemUsed, "percent": memPct,
 			"available": sample.MemTotal - sample.MemUsed, "free": sample.MemTotal - sample.MemUsed,

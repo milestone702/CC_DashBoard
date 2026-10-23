@@ -25,6 +25,7 @@ type reportPayload struct {
 	AgentGoos    string            `json:"agent_goos,omitempty"`
 	AgentArch    string            `json:"agent_arch,omitempty"`
 	PublicIP     string            `json:"public_ip,omitempty"`
+	AgentMem     int64             `json:"agent_mem,omitempty"` // Agent 自身内存占用（字节）
 	BootEvents   []model.BootEvent `json:"boot_events,omitempty"`
 }
 
@@ -58,6 +59,11 @@ func (s *Server) handleReport(c *gin.Context) {
 	// ts / node_id 一律以服务端为准
 	sample := p.MetricsSample
 	sample.NodeID = node.ID
+	// 温度：Agent 未在顶层给出时，从 live.temps 里提取最高值（统一在服务端处理，
+	// 采集端只管往 live 里写，不必各自改上报格式）
+	if sample.TempMax == 0 {
+		sample.TempMax = model.ExtractTempMax(p.Live)
+	}
 	if err := s.db.InsertSample(node.ID, &sample); err != nil {
 		fail(c, http.StatusInternalServerError, "store sample failed")
 		return
@@ -66,6 +72,10 @@ func (s *Server) handleReport(c *gin.Context) {
 	// 身份元数据：版本/目标平台（供程序池匹配与可升级提示）
 	if p.AgentVersion != "" || p.AgentGoos != "" || p.AgentArch != "" {
 		_ = s.db.UpdateNodeAgentMeta(node.ID, p.AgentVersion, p.AgentGoos, p.AgentArch)
+	}
+	// Agent 自监控：自身内存占用
+	if p.AgentMem > 0 {
+		_ = s.db.SetNodeAgentMem(node.ID, p.AgentMem)
 	}
 	// 公网 IP：优先上报连接的源 IP（公网时），否则取 Agent 上报值（公网时）；均无则保留原值
 	if ip := resolvePublicIP(c.Request.RemoteAddr, p.PublicIP); ip != "" {

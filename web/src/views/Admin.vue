@@ -2,12 +2,31 @@
   <div class="space-y-6">
     <div class="flex items-center justify-between">
       <h2 class="text-xl font-semibold">节点管理</h2>
-      <button
-        class="rounded bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"
-        @click="showForm = !showForm"
-      >
-        {{ showForm ? '收起' : '添加节点' }}
-      </button>
+      <div class="flex items-center gap-2">
+        <!-- 配置导出：浏览器下载 JSON（同源带 Cookie，不含凭据） -->
+        <a
+          href="/api/v1/backup"
+          download
+          class="rounded bg-slate-800 px-3 py-2 text-sm text-slate-300 hover:bg-slate-700"
+          title="导出节点/规则/站点配置（不含 Token 与凭据）"
+        >
+          导出配置
+        </a>
+        <!-- 配置导入：只新增不覆盖，同名节点/同参数规则跳过 -->
+        <label
+          class="cursor-pointer rounded bg-slate-800 px-3 py-2 text-sm text-slate-300 hover:bg-slate-700"
+          title="从备份 JSON 导入（只新增，不覆盖现有配置）"
+        >
+          导入配置
+          <input type="file" accept="application/json,.json" class="hidden" @change="onRestoreFile" />
+        </label>
+        <button
+          class="rounded bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"
+          @click="showForm = !showForm"
+        >
+          {{ showForm ? '收起' : '添加节点' }}
+        </button>
+      </div>
     </div>
 
     <!-- 创建表单 -->
@@ -36,6 +55,13 @@
           v-model="form.address"
           placeholder="地址（如 192.168.1.10）"
           class="rounded bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none ring-emerald-700 focus:ring"
+        />
+        <input
+          v-model="form.group_tag"
+          maxlength="24"
+          placeholder="分组（可选，如 家里 / 机房A）"
+          class="rounded bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none ring-emerald-700 focus:ring"
+          title="概览页会按分组显示；留空则归入「未分组」"
         />
         <!-- 模式 A（Agent）：连接方向（反向推送 / 正向拉取） -->
         <template v-if="form.access_mode === 'agent'">
@@ -138,7 +164,9 @@
 
     <!-- 节点表格 -->
     <section class="overflow-hidden rounded-xl border border-slate-800">
-      <table class="w-full text-left text-sm">
+      <!-- 桌面/平板：完整表格 -->
+      <div class="hidden overflow-x-auto md:block">
+        <table class="w-full text-left text-sm">
         <thead class="bg-slate-900 text-xs text-slate-400">
           <tr>
             <th class="px-4 py-3">名称</th>
@@ -164,6 +192,15 @@
           >
             <td class="px-4 py-3">
               <router-link :to="`/device/${n.id}`" class="hover:text-emerald-400">{{ n.name }}</router-link>
+              <!-- 分组标签：点击即可修改（自由文本，留空=取消分组） -->
+              <button
+                class="mt-0.5 block rounded px-1.5 py-0.5 text-[10px]"
+                :class="n.group_tag ? 'bg-sky-900/60 text-sky-300 hover:bg-sky-900' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'"
+                title="点击设置分组"
+                @click.stop="setGroup(n)"
+              >
+                {{ n.group_tag || '+ 分组' }}
+              </button>
             </td>
             <td class="px-4 py-3 text-xs">{{ n.os_type }}</td>
             <td class="px-4 py-3 text-xs">{{ n.access_mode }}</td>
@@ -178,13 +215,13 @@
             </td>
             <td class="px-4 py-3 text-xs">{{ n.latest ? fmtPct(n.latest.cpu) : '—' }}</td>
             <td class="px-4 py-3 text-xs whitespace-nowrap">
-              {{ n.agent_version ? 'v' + n.agent_version : '—' }}
+              {{ fmtVer(n.agent_version) || '—' }}
               <span
                 v-if="n.upgrade"
                 class="ml-1 rounded bg-emerald-900/60 px-1 py-0.5 text-[10px] text-emerald-300"
                 title="程序池中有可升级版本"
               >
-                ↑ v{{ n.upgrade.version }}
+                ↑ {{ fmtVer(n.upgrade.version) }}
               </span>
               <button
                 v-if="n.upgrade"
@@ -265,12 +302,102 @@
                 >
                   换Token
                 </button>
+                <button
+                  class="mr-2 text-slate-500 hover:text-amber-400"
+                  title="告警静默（维护窗口内照常记录告警，但不发通知）"
+                  @click="muteNode(n)"
+                >
+                  {{ n.mute_until > 0 ? '静默中' : '静默' }}
+                </button>
                 <button class="text-slate-500 hover:text-danger" @click="remove(n)">删除</button>
               </template>
             </td>
           </tr>
         </tbody>
       </table>
+      </div>
+
+      <!-- 手机：卡片式（表格 9 列在窄屏无法使用），操作全部保留 -->
+      <ul class="divide-y divide-slate-800 md:hidden">
+        <li v-for="(n, i) in nodes" :key="n.id" class="bg-slate-950 px-3 py-3">
+          <div class="flex items-start gap-2">
+            <span class="mt-1.5 h-2 w-2 shrink-0 rounded-full" :class="statusDotClass(n.status)"></span>
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <router-link :to="`/device/${n.id}`" class="truncate font-medium text-slate-200">
+                  {{ n.name }}
+                </router-link>
+                <span class="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase text-slate-400">
+                  {{ n.os_type }}
+                </span>
+                <span
+                  v-if="n.approved === false"
+                  class="shrink-0 rounded bg-warning/20 px-1.5 py-0.5 text-[10px] text-warning"
+                >
+                  待批准
+                </span>
+              </div>
+              <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                <span>{{ n.access_mode }}</span>
+                <span>{{ n.address || '—' }}</span>
+                <span v-if="n.latest">CPU {{ fmtPct(n.latest.cpu) }}</span>
+                <span v-if="n.agent_version">{{ fmtVer(n.agent_version) }}</span>
+                <span v-if="n.public_ip">公网 {{ n.public_ip }}</span>
+              </div>
+              <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <button
+                  class="rounded px-1.5 py-0.5 text-[10px]"
+                  :class="n.group_tag ? 'bg-sky-900/60 text-sky-300' : 'bg-slate-800 text-slate-500'"
+                  @click="setGroup(n)"
+                >
+                  {{ n.group_tag || '+ 分组' }}
+                </button>
+                <span
+                  v-if="n.upgrade"
+                  class="rounded bg-emerald-900/60 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                >
+                  可升级 {{ fmtVer(n.upgrade.version) }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 操作区：换行排列，触屏友好（拖拽改为上下移） -->
+          <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-slate-800 pt-2 text-xs">
+            <span class="flex items-center gap-1 text-slate-600">
+              <button class="px-1 disabled:opacity-30" :disabled="i === 0" @click="moveNode(i, -1)">▲</button>
+              <button
+                class="px-1 disabled:opacity-30"
+                :disabled="i === nodes.length - 1"
+                @click="moveNode(i, 1)"
+              >
+                ▼
+              </button>
+            </span>
+            <button class="text-slate-400" @click="renameNode(n)">改名</button>
+            <button class="text-slate-400" @click="editPublicIP(n)">公网IP</button>
+            <template v-if="n.approved === false">
+              <button class="text-emerald-400" @click="approve(n)">批准</button>
+              <button class="text-slate-500" @click="remove(n)">拒绝</button>
+            </template>
+            <template v-else>
+              <button v-if="n.access_mode === 'ssh'" class="text-sky-400" @click="openEdit(n)">凭据</button>
+              <button v-if="n.access_mode === 'ssh'" class="text-slate-500" @click="rotateHostKey(n)">
+                重置指纹
+              </button>
+              <button v-if="n.access_mode === 'agent'" class="text-slate-500" @click="rotateToken(n)">
+                换Token
+              </button>
+              <button v-if="n.upgrade" class="text-emerald-400" @click="triggerUpgrade(n)">升级</button>
+              <button class="text-amber-400" @click="muteNode(n)">
+                {{ n.mute_until > 0 ? '静默中' : '静默' }}
+              </button>
+              <button class="text-slate-500" @click="remove(n)">删除</button>
+            </template>
+          </div>
+        </li>
+      </ul>
+
       <p v-if="nodes.length === 0" class="px-4 py-8 text-center text-xs text-slate-600">
         暂无节点 — 点击右上角「添加节点」创建
       </p>
@@ -310,8 +437,9 @@
         <span v-if="poolMsg" class="text-slate-400">{{ poolMsg }}</span>
       </div>
 
-      <!-- 池清单 -->
-      <table v-if="poolItems.length" class="w-full text-left text-xs">
+      <!-- 池清单：桌面表格 + 手机卡片 -->
+      <div v-if="poolItems.length" class="hidden overflow-x-auto md:block">
+        <table class="w-full text-left text-xs">
         <thead class="text-slate-500">
           <tr>
             <th class="py-2">组件</th>
@@ -327,7 +455,7 @@
         <tbody class="divide-y divide-slate-800">
           <tr v-for="it in poolItems" :key="it.id" class="text-slate-400">
             <td class="py-2">{{ it.component === 'server' ? 'Dashboard' : 'Agent' }}</td>
-            <td>{{ it.version }}</td>
+            <td>{{ fmtVer(it.version) }}</td>
             <td>{{ [it.goos, it.arch].filter(Boolean).join('/') || '—' }}</td>
             <td>{{ it.format }}</td>
             <td>{{ fmtBytes(it.size) }}</td>
@@ -339,6 +467,25 @@
           </tr>
         </tbody>
       </table>
+      </div>
+      <ul v-if="poolItems.length" class="divide-y divide-slate-800 md:hidden">
+        <li v-for="it in poolItems" :key="it.id" class="py-2.5">
+          <div class="flex items-center gap-2">
+            <span class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+              {{ it.component === 'server' ? 'Dashboard' : 'Agent' }}
+            </span>
+            <span class="text-xs text-slate-200">{{ fmtVer(it.version) }}</span>
+            <span class="text-[11px] text-slate-500">{{ it.format }}</span>
+            <button class="ml-auto text-xs text-slate-500" @click="removePool(it)">删除</button>
+          </div>
+          <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
+            <span>{{ [it.goos, it.arch].filter(Boolean).join('/') || '—' }}</span>
+            <span>{{ fmtBytes(it.size) }}</span>
+            <span>{{ fmtClock(it.created_at) }}</span>
+            <span class="truncate" :title="it.sha256">sha256 {{ it.sha256.slice(0, 12) }}…</span>
+          </div>
+        </li>
+      </ul>
       <p v-else class="text-xs text-slate-600">
         池为空 — 上传后节点显示可升级提示；开启 OTA 开关后 Agent 将自动升级（OpenWrt 仅提示）
       </p>
@@ -404,16 +551,21 @@
           <option value="cpu">CPU</option>
           <option value="mem_pct">内存</option>
           <option value="disk_pct">磁盘</option>
+          <option value="load1">负载（1 分钟）</option>
+          <option value="net_rx">下行速率</option>
+          <option value="net_tx">上行速率</option>
+          <option value="temp">温度</option>
         </select>
         <span class="text-slate-500">超过</span>
         <input
           v-model.number="rule.threshold"
           type="number"
-          min="1"
-          max="100"
-          class="w-20 rounded bg-slate-950 px-2 py-1.5 text-slate-200"
+          min="0"
+          :max="metricMeta.max"
+          class="w-24 rounded bg-slate-950 px-2 py-1.5 text-slate-200"
+          :title="metricMeta.hint"
         />
-        <span class="text-slate-500">%，持续</span>
+        <span class="text-slate-500">{{ metricMeta.unit }}，持续</span>
         <input
           v-model.number="rule.delayMin"
           type="number"
@@ -448,8 +600,8 @@
         <li v-for="r in rules" :key="r.id" class="flex items-center justify-between">
           <span class="text-slate-300" :class="{ 'opacity-50': !r.enabled }">
             {{ r.node_id === 0 ? '全局' : `节点#${r.node_id}` }} ·
-            {{ { cpu: 'CPU', mem_pct: '内存', disk_pct: '磁盘' }[r.metric] || r.metric }}
-            {{ r.op }} {{ r.threshold }}% ·
+            {{ metricLabel(r.metric) }}
+            {{ r.op }} {{ r.threshold }}{{ metricUnit(r.metric) }} ·
             {{ r.delay_sec > 0 ? '持续 ' + fmtDelay(r.delay_sec) + '触发' : '立即触发' }}
             <span v-if="!r.enabled" class="text-slate-600">（已停用）</span>
           </span>
@@ -529,6 +681,30 @@
           </p>
         </div>
 
+        <!-- Prometheus 抓取令牌 -->
+        <div>
+          <h4 class="mb-2 text-xs text-slate-500">Prometheus 抓取令牌（可选）</h4>
+          <div class="mb-2 flex items-center gap-2">
+            <input
+              v-model="metricsToken.value"
+              type="text"
+              :placeholder="metricsToken.set ? '已设置（留空保存=关闭校验）' : '未设置 → /metrics 开放'"
+              class="min-w-0 flex-1 rounded bg-slate-950 px-2 py-1.5 text-xs text-slate-200 outline-none ring-emerald-700 focus:ring"
+            />
+            <button
+              class="rounded bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+              @click="saveMetricsToken"
+            >
+              保存
+            </button>
+          </div>
+          <p class="text-[11px] leading-relaxed text-slate-600">
+            设置后 <code class="text-slate-400">GET /metrics</code> 需带 <code class="text-slate-400">?token=xxx</code>
+            （Prometheus 的 <code class="text-slate-400">params</code> 里配置），防止公网裸奔泄露节点名与指标。
+            留空保存即恢复开放。
+          </p>
+        </div>
+
         <!-- 站点标题 -->
         <div>
           <h4 class="mb-2 text-xs text-slate-500">站点标题（左上角品牌名）</h4>
@@ -551,6 +727,99 @@
       </div>
     </section>
 
+    <!-- API Key（App / 脚本接入） -->
+    <section class="rounded-xl border border-slate-800 bg-slate-900 p-4">
+      <div class="mb-3 flex items-center gap-2">
+        <h3 class="text-sm text-slate-400">API Key（App / 脚本接入）</h3>
+        <span class="rounded bg-slate-800 px-2 py-0.5 text-[11px] text-slate-400">
+          已签发 {{ apiKeys.length }} 条
+        </span>
+      </div>
+
+      <div class="grid gap-5 lg:grid-cols-2">
+        <!-- 新建 -->
+        <div>
+          <h4 class="mb-2 text-xs text-slate-500">新建凭证（每台设备 / 脚本一条，互不影响）</h4>
+          <div class="mb-2 flex flex-wrap items-center gap-2">
+            <input
+              v-model="apiKey.name"
+              maxlength="32"
+              placeholder="名称，如 我的手机"
+              class="w-32 rounded bg-slate-950 px-2 py-1.5 text-xs text-slate-200 outline-none ring-emerald-700 focus:ring"
+            />
+            <select
+              v-model="apiKey.scope"
+              class="rounded bg-slate-950 px-2 py-1.5 text-xs text-slate-200 outline-none ring-emerald-700 focus:ring"
+            >
+              <option value="view">只读（面板数据）</option>
+              <option value="admin">管理员（读写）</option>
+            </select>
+            <button
+              class="rounded bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+              @click="createApiKey"
+            >
+              生成
+            </button>
+          </div>
+          <p class="text-[11px]" :class="apiKey.msgOk ? 'text-online' : 'text-slate-600'">{{ apiKey.msg }}</p>
+
+          <h4 class="mb-2 mt-3 text-xs text-slate-500">新生成的明文（只显示这一次）</h4>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 truncate rounded bg-slate-950 px-2 py-1.5 text-xs text-slate-300">
+              {{ apiKey.plain || '—' }}
+            </code>
+            <button
+              class="rounded bg-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-700 disabled:opacity-40"
+              :disabled="!apiKey.plain"
+              @click="copyApiKey"
+            >
+              复制
+            </button>
+          </div>
+        </div>
+
+        <!-- 已签发 -->
+        <div>
+          <h4 class="mb-2 text-xs text-slate-500">已签发凭证</h4>
+          <div class="overflow-x-auto">
+          <table v-if="apiKeys.length" class="w-full text-left text-xs">
+            <thead class="text-slate-500">
+              <tr>
+                <th class="py-1 font-normal">名称</th>
+                <th class="py-1 font-normal">权限</th>
+                <th class="py-1 font-normal">创建时间</th>
+                <th class="py-1 text-right font-normal">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="k in apiKeys" :key="k.id" class="border-t border-slate-800">
+                <td class="py-1.5 text-slate-300">{{ k.name }}</td>
+                <td class="py-1.5" :class="k.scope === 'admin' ? 'text-emerald-300' : 'text-slate-400'">
+                  {{ k.scope === 'admin' ? '读写' : '只读' }}
+                </td>
+                <td class="py-1.5 text-slate-500">{{ fmtClock(k.created_at) }}</td>
+                <td class="py-1.5 text-right">
+                  <button
+                    class="rounded bg-red-900/40 px-2 py-1 text-red-300 hover:bg-red-900"
+                    @click="revokeApiKey(k)"
+                  >
+                    吊销
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="text-[11px] text-slate-600">尚未签发任何凭证</p>
+          </div>
+          <p class="mt-2 text-[11px] leading-relaxed text-slate-600">
+            REST 用 <code class="text-slate-400">Authorization: Bearer &lt;key&gt;</code>；WebSocket 可用
+            <code class="text-slate-400">?access_token=&lt;key&gt;</code>。服务端只存 SHA-256，
+            明文遗失只能重新生成，吊销某条不影响其它设备。
+          </p>
+        </div>
+      </div>
+    </section>
+
     <!-- 告警通知设置 -->
     <section class="rounded-xl border border-slate-800 bg-slate-900 p-4">
       <h3 class="mb-3 text-sm text-slate-400">告警通知（随阈值规则触发）</h3>
@@ -567,6 +836,8 @@
             <option value="dingtalk">钉钉机器人</option>
             <option value="wecom">企业微信机器人</option>
             <option value="webhook">通用 Webhook</option>
+            <option value="ntfy">ntfy（手机推送）</option>
+            <option value="telegram">Telegram Bot</option>
             <option value="smtp">SMTP 邮件</option>
           </select>
         </div>
@@ -639,6 +910,43 @@
             />
           </div>
         </template>
+        <!-- ntfy / Telegram：都是「地址 + 令牌」两个字段，共用一套表单 -->
+        <template v-else-if="notify.channel === 'ntfy' || notify.channel === 'telegram'">
+          <div>
+            <p class="mb-1 text-slate-500">
+              {{ notify.channel === 'telegram' ? 'chat_id' : '主题地址' }}
+            </p>
+            <input
+              v-model="notify.url"
+              type="text"
+              :placeholder="
+                notify.urlSet
+                  ? '已配置（留空保持不变）'
+                  : notify.channel === 'telegram'
+                    ? '123456789 或 -1001234567890（群组）'
+                    : 'https://ntfy.sh/my-topic'
+              "
+              class="w-72 rounded bg-slate-950 px-2.5 py-2 text-slate-200 outline-none ring-emerald-700 focus:ring"
+            />
+          </div>
+          <div>
+            <p class="mb-1 text-slate-500">
+              {{ notify.channel === 'telegram' ? 'Bot Token' : '访问令牌（可选）' }}
+            </p>
+            <input
+              v-model="notify.token"
+              type="text"
+              :placeholder="
+                notify.tokenSet
+                  ? '已配置（留空保持不变）'
+                  : notify.channel === 'telegram'
+                    ? '从 @BotFather 获取'
+                    : '受保护主题才需要'
+              "
+              class="w-56 rounded bg-slate-950 px-2.5 py-2 text-slate-200 outline-none ring-emerald-700 focus:ring"
+            />
+          </div>
+        </template>
         <div v-else>
           <p class="mb-1 text-slate-500">
             {{ notify.channel === 'webhook' ? 'Webhook 地址' : '机器人 Webhook 地址' }}
@@ -654,7 +962,8 @@
         <button class="rounded bg-slate-800 px-4 py-2 text-slate-300 hover:bg-slate-700" @click="testNotify">发送测试</button>
       </div>
       <p class="mt-2 text-[11px] text-slate-600">
-        触发时机：指标突破阈值 / 恢复正常、节点离线 / 恢复，各推送一条。pushplus 免费版关注公众号即可接收。
+        触发时机：指标突破阈值 / 恢复正常、节点离线 / 恢复，各推送一条。pushplus 免费版关注公众号即可接收；
+        ntfy 手机装 App 订阅同一主题即可（支持自建实例）。
       </p>
       <p class="mt-1 text-[11px]" :class="notify.msgOk ? 'text-online' : 'text-slate-600'">{{ notify.msg }}</p>
       <!-- 发送记录（成功/失败均落库） -->
@@ -677,6 +986,35 @@
         <p v-else class="text-[11px] text-slate-600">暂无记录</p>
       </div>
     </section>
+
+    <!-- 操作审计：管理员写操作追溯（多设备共用 Key 时定位「谁改的」） -->
+    <section class="rounded-xl border border-slate-800 bg-slate-900 p-4">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 class="text-sm text-slate-400">操作日志（最近 50 条）</h3>
+        <button class="rounded bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700" @click="loadAudit">
+          刷新
+        </button>
+      </div>
+      <ul v-if="audits.length" class="space-y-1 text-[11px]">
+        <li v-for="a in audits" :key="a.id" class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-slate-400">
+          <span class="shrink-0 text-slate-500">{{ fmtClock(a.ts) }}</span>
+          <span
+            class="shrink-0 rounded px-1.5 py-0.5 text-[10px]"
+            :class="{
+              'bg-sky-900/60 text-sky-300': a.method === 'POST',
+              'bg-amber-900/60 text-amber-300': a.method === 'PUT',
+              'bg-red-900/60 text-red-300': a.method === 'DELETE',
+            }"
+          >
+            {{ a.method }}
+          </span>
+          <span class="min-w-0 flex-1 truncate font-mono text-slate-400">{{ a.path }}</span>
+          <span class="shrink-0 text-slate-600">{{ a.actor }}</span>
+          <span class="shrink-0" :class="a.status >= 400 ? 'text-danger' : 'text-online'">{{ a.status }}</span>
+        </li>
+      </ul>
+      <p v-else class="text-[11px] text-slate-600">暂无记录（只记录管理员的写操作）</p>
+    </section>
   </div>
 </template>
 
@@ -687,7 +1025,7 @@ import { useNodesStore } from '../stores/nodes'
 import { useAuthStore } from '../stores/auth'
 import { getJSON, postJSON, putJSON, delJSON } from '../api'
 import { siteTitle } from '../site'
-import { fmtPct, statusDotClass, statusText, fmtClock, fmtBytes } from '../utils/format'
+import { fmtPct, statusDotClass, statusText, fmtClock, fmtBytes, fmtVer } from '../utils/format'
 
 const store = useNodesStore()
 const auth = useAuthStore()
@@ -714,7 +1052,7 @@ const modes = [
   { value: 'ssh', label: 'B', name: 'SSH 轮询' },
   { value: 'api', label: 'C', name: 'API 直连（群晖/PVE）' },
 ]
-const form = reactive({ name: '', os_type: 'linux', access_mode: 'agent', address: '', username: '', password: '', port: 22, direction: 'push', nodeName: '' })
+const form = reactive({ name: '', os_type: 'linux', access_mode: 'agent', address: '', group_tag: '', username: '', password: '', port: 22, direction: 'push', nodeName: '' })
 
 // 群晖/PVE 走服务端 API 直连：选中系统类型即自动切到模式 C，避免用户找不到入口
 watch(
@@ -728,10 +1066,78 @@ const rules = ref([])
 const rule = reactive({ metric: 'cpu', threshold: 80, delayMin: 0, enabled: true, op: '>' })
 const editingRuleId = ref(null)
 
+// 规则指标元数据：名称 / 单位 / 上限（与后端 metricMax 保持一致）
+const METRIC_META = {
+  cpu: { label: 'CPU', unit: '%', max: 100, hint: 'CPU 使用率百分比' },
+  mem_pct: { label: '内存', unit: '%', max: 100, hint: '内存使用率百分比' },
+  disk_pct: { label: '磁盘', unit: '%', max: 100, hint: '主分区占用百分比' },
+  load1: { label: '负载', unit: '（1 分钟负载值）', max: 1000, hint: '如 4 表示 4.0 的 1 分钟平均负载' },
+  net_rx: { label: '下行速率', unit: 'B/s', max: 1e12, hint: '字节/秒，如 1048576 = 1 MB/s' },
+  net_tx: { label: '上行速率', unit: 'B/s', max: 1e12, hint: '字节/秒，如 1048576 = 1 MB/s' },
+  temp: { label: '温度', unit: '℃', max: 150, hint: '节点最高温度（无温度传感器时为 0，不会触发）' },
+}
+const metricMeta = computed(() => METRIC_META[rule.metric] || METRIC_META.cpu)
+const metricLabel = (m) => (METRIC_META[m] || { label: m }).label
+const metricUnit = (m) => (METRIC_META[m] || { unit: '' }).unit
+
 function fmtDelay(sec) {
   if (sec >= 3600 && sec % 3600 === 0) return `${sec / 3600} 小时 `
   if (sec >= 60 && sec % 60 === 0) return `${sec / 60} 分钟 `
   return `${sec} 秒 `
+}
+
+// 设置节点分组（自由文本；留空=取消分组），保存后概览页按分组重排
+async function setGroup(n) {
+  const tag = prompt(`设置「${n.name}」的分组（留空=取消分组）`, n.group_tag || '')
+  if (tag === null) return
+  try {
+    await putJSON(`/nodes/${n.id}`, { group_tag: tag.trim() })
+    await store.fetchNodes()
+  } catch (e) {
+    alert(`设置分组失败: ${e.message}`)
+  }
+}
+
+// ---------- Prometheus 抓取令牌 ----------
+const metricsToken = reactive({ value: '', set: false })
+
+async function loadMetricsToken() {
+  try {
+    const r = await getJSON('/auth/metrics-token')
+    metricsToken.set = !!r.set
+  } catch {
+    /* 非管理员：忽略 */
+  }
+}
+
+async function saveMetricsToken() {
+  try {
+    const r = await putJSON('/auth/metrics-token', { token: metricsToken.value.trim() })
+    metricsToken.set = !!r.set
+    metricsToken.value = ''
+  } catch (e) {
+    alert(`保存失败: ${e.message}`)
+  }
+}
+
+// 告警静默（维护窗口）：静默期内告警照常记录，只是不发通知，避免重启/升级时刷屏
+async function muteNode(n) {
+  const now = Math.floor(Date.now() / 1000)
+  const state =
+    n.mute_until > now ? `当前静默至 ${fmtClock(n.mute_until)}` : '当前未静默'
+  const input = prompt(`${state}\n输入静默分钟数（0 = 解除，最长 7 天）`, '60')
+  if (input === null) return
+  const m = Number(input)
+  if (!Number.isFinite(m) || m < 0) {
+    alert('请输入有效的分钟数')
+    return
+  }
+  try {
+    await putJSON(`/nodes/${n.id}`, { mute_minutes: Math.floor(m) })
+    await store.fetchNodes()
+  } catch (e) {
+    alert(`设置静默失败: ${e.message}`)
+  }
 }
 
 async function create() {
@@ -742,6 +1148,7 @@ async function create() {
       os_type: form.os_type,
       access_mode: form.access_mode,
       address: form.address,
+      group_tag: form.group_tag || '',
     }
     if (form.access_mode === 'ssh') {
       body.port = form.port || 22
@@ -1039,6 +1446,55 @@ async function rotateJoin() {
   }
 }
 
+// ---------- API Key（多凭证） ----------
+const apiKeys = ref([])
+const apiKey = reactive({ name: '', scope: 'view', plain: '', msg: '', msgOk: false })
+
+async function loadApiKeys() {
+  try {
+    const r = await getJSON('/auth/api-keys')
+    apiKeys.value = r.keys || []
+  } catch {
+    /* 非管理员或接口未就绪：保持空列表 */
+  }
+}
+
+async function createApiKey() {
+  try {
+    const r = await postJSON('/auth/api-keys', { name: apiKey.name || 'device', scope: apiKey.scope })
+    apiKey.plain = r.api_key
+    apiKey.msg = `已生成「${r.key?.name || 'device'}」，请立即复制（明文只显示这一次）`
+    apiKey.msgOk = true
+    apiKey.name = ''
+    await loadApiKeys()
+  } catch (e) {
+    apiKey.msg = e.message || '生成失败'
+    apiKey.msgOk = false
+  }
+}
+
+async function revokeApiKey(k) {
+  if (!confirm(`吊销「${k.name}」后，使用该 Key 的客户端立即失效（其它设备不受影响），确认？`)) return
+  try {
+    await delJSON(`/auth/api-keys/${k.id}`)
+    await loadApiKeys()
+  } catch (e) {
+    alert(e.message || '吊销失败')
+  }
+}
+
+async function copyApiKey() {
+  if (!apiKey.plain) return
+  try {
+    await navigator.clipboard.writeText(apiKey.plain)
+    apiKey.msg = '已复制到剪贴板'
+    apiKey.msgOk = true
+  } catch {
+    apiKey.msg = '剪贴板不可用，请手动选中复制'
+    apiKey.msgOk = false
+  }
+}
+
 // ---------- 告警通知 ----------
 const notify = reactive({
   enabled: false,
@@ -1212,7 +1668,7 @@ const normVer = (s) => (s || '').trim().replace(/^[vV]/, '')
 const serverHint = computed(() => {
   const latest = poolItems.value.find((it) => it.component === 'server')
   if (!latest || !serverVersion.value || normVer(latest.version) === normVer(serverVersion.value)) return ''
-  return `服务端当前 ${serverVersion.value}，池中有新版本 ${latest.version}（请手动替换二进制升级）`
+  return `服务端当前 ${fmtVer(serverVersion.value)}，池中有新版本 ${fmtVer(latest.version)}（请手动替换二进制升级）`
 })
 
 function onPoolFiles(e) {
@@ -1248,10 +1704,10 @@ async function uploadPool() {
 
 // 手动触发单节点升级：标记后节点下次上报即下发 upgrade 指令（不受全局 OTA 开关限制）
 async function triggerUpgrade(n) {
-  if (!confirm(`立即升级「${n.name}」到 v${n.upgrade.version}？\n（节点下次上报时生效，不受全局 OTA 开关限制）`)) return
+  if (!confirm(`立即升级「${n.name}」到 ${fmtVer(n.upgrade.version)}？\n（节点下次上报时生效，不受全局 OTA 开关限制）`)) return
   try {
     const r = await postJSON(`/nodes/${n.id}/upgrade`, {})
-    alert(`已标记升级：${n.name} → v${r.version}（等待节点下次上报自动下载升级）`)
+    alert(`已标记升级：${n.name} → ${fmtVer(r.version)}（等待节点下次上报自动下载升级）`)
   } catch (e) {
     alert(`下发失败: ${e.message}`)
   }
@@ -1267,7 +1723,7 @@ function editPublicIP(n) {
 }
 
 async function removePool(it) {
-  if (!confirm(`删除 ${it.component} v${it.version}（${[it.goos, it.arch].filter(Boolean).join('/')}）？`)) return
+  if (!confirm(`删除 ${it.component} ${fmtVer(it.version)}（${[it.goos, it.arch].filter(Boolean).join('/')}）？`)) return
   try {
     await delJSON(`/pool/${it.id}`)
     await loadPool()
@@ -1285,14 +1741,55 @@ async function togglePoolOta() {
   }
 }
 
+// ---------- 操作审计 ----------
+const audits = ref([])
+async function loadAudit() {
+  try {
+    audits.value = (await getJSON('/audit?limit=50')).logs || []
+  } catch {
+    /* 非管理员：忽略 */
+  }
+}
+
+// 从备份 JSON 导入（只新增，不覆盖）；导入的 Agent 节点需重新配置 Token
+async function onRestoreFile(e) {
+  const f = e.target.files?.[0]
+  e.target.value = '' // 允许重复选择同一个文件
+  if (!f) return
+  if (
+    !confirm(
+      `从「${f.name}」导入配置？\n\n` +
+        `· 只新增，不覆盖：同名节点、同参数规则会跳过\n` +
+        `· 导入的 Agent 节点会生成新 Token，需重新配置到设备上\n` +
+        `· SSH/PVE/群晖凭据不在备份中，导入后需手工补填`,
+    )
+  )
+    return
+  try {
+    const json = JSON.parse(await f.text())
+    const r = await postJSON('/restore', json)
+    alert(
+      `导入完成\n节点：新增 ${r.nodes_created}，跳过 ${r.nodes_skipped}\n规则：新增 ${r.rules_created}，跳过 ${r.rules_skipped}`,
+    )
+    await store.fetchNodes()
+    await loadRules()
+    await loadAudit()
+  } catch (err) {
+    alert(`导入失败: ${err.message}`)
+  }
+}
+
 onMounted(() => {
   store.fetchNodes()
   loadRules()
   loadView()
   loadJoin()
+  loadApiKeys()
+  loadMetricsToken()
   loadNotify()
   loadNotifyLogs()
   loadSiteTitle()
   loadPool()
+  loadAudit()
 })
 </script>

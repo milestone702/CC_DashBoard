@@ -31,8 +31,10 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// SQLite 单写者：限制为 1 连接，避免 SQLITE_BUSY（gorm 不用，纯 database/sql）
-	db.SetMaxOpenConns(1)
+	// WAL 模式允许并发读；写仍串行（busy_timeout 5s 兜底重试），
+	// 多连接避免「采集+API+降采样」互相排队。
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}

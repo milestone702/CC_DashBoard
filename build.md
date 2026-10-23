@@ -6,7 +6,7 @@
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-版本号在构建时**交互生成**并记录到仓库根 `VERSION` 文件：显示上次版本并提示输入，**直接回车 = 自动 +0.1**（如 V0.3 → V0.4），输入 `V2.0` 升大版本；首次构建以 `V0.{git提交数}` 播种。非交互：`-Version V2.0` 指定、`-Auto` 自动递增（stdin 重定向时自动降级为 `-Auto` 防挂起）。`V…` 形式注入二进制（`-version` 可查看）；deb/rpm/ipk 用去 V 的数字形式（打包规范要求）。
+版本号在构建时**交互生成**并记录到仓库根 `VERSION` 文件：显示上次版本并提示输入，**直接回车 = 次版本 +1、补丁归零**（如 `V0.2.0` → `V0.3.0`），输入 `V2` 升主版本；首次构建以 `V0.{git提交数}.0` 播种。**`VERSION` 文件与产物文件名统一为三段式**（`V0.2.0` / `cc-dashboard-0.2.0-linux-amd64`），旧的两段写法（`V0.2`）读取时会自动补足为 `V0.2.0` 并写回。非交互：`-Version V2.0` 指定、`-Auto` 自动递增（stdin 重定向时自动降级为 `-Auto` 防挂起）。`V…` 形式注入二进制（`-version` 可查看）。
 deb/rpm 需要本机安装 [nfpm](https://goreleaser.com/nfpm/)（`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`），未安装则跳过该两类包；ipk 由内置工具 `tools/mkipk` 构建，无额外依赖。
 
 ## 图标与版本信息
@@ -18,14 +18,30 @@ deb/rpm 需要本机安装 [nfpm](https://goreleaser.com/nfpm/)（`go install gi
 
 ## 该用哪个文件？
 
+> 下文 `<版本>` 取自仓库根目录 `VERSION` 文件，**统一为三段式**（`VERSION` 为 `V0.2` 时产物名是 `cc-dashboard-0.2.0-linux-amd64`）。
+> 所有裸二进制、ipk、deb、rpm 用同一个三段式版本号，便于并行保留多个版本。
+
+**命名规则**（三种包格式的固有差异）：
+
+| 格式 | 文件名示例 | 说明 |
+|---|---|---|
+| 裸二进制 | `cc-dashboard-0.2.0-linux-amd64` | `<name>-<版本>-<系统>-<架构>[.exe]` |
+| deb | `cc-agent_0.2.0_amd64.deb` | 下划线分隔，**deb 没有 release 字段** |
+| rpm | `cc-agent-0.2.0-1.x86_64.rpm` | 连字符分隔，`-1` 是 **release（打包修订号）** |
+| ipk | `cc-agent-0.2.0-x86_64.ipk` | 架构名为 OpenWrt 命名（`mipsel_24kc` 等） |
+
+> rpm 里的 `-1` **不是版本号重复**：RPM 包标识固定为 `name-version-release`（N-V-R），
+> release 由打包者维护，只有「同一版本重新打包」时才 +1，这里固定为 `1`。
+> 例如 nginx 的 `nginx-1.24.0-1.el9.x86_64.rpm` 也是同样的结构。
+
 ### 服务端（Master，装一台就够）
 
 | 文件 | 平台 | 说明 |
 |---|---|---|
-| `cc-server-windows-amd64.exe` | Windows 10/11、Server（x86_64） | 直接运行或 `--install` 注册服务 |
-| `cc-server-linux-amd64` | Linux x86_64：Ubuntu / Debian / CentOS / 飞牛 / 群晖 VM 等 | 单二进制，已内嵌面板 |
-| `cc-server-linux-arm64` | Linux ARM64：树莓派 4/5（64 位系统）、瑞芯微 / 晶晨盒子 | 同上 |
-| `cc-server-linux-armv7` | Linux ARMv7（32 位）：树莓派 2/3、旧款矿渣 | 同上 |
+| `cc-dashboard-<版本>-windows-amd64.exe` | Windows 10/11、Server（x86_64） | 直接运行或 `--install` 注册服务 |
+| `cc-dashboard-<版本>-linux-amd64` | Linux x86_64：Ubuntu / Debian / CentOS / 飞牛 / 群晖 VM 等 | 单二进制，已内嵌面板 |
+| `cc-dashboard-<版本>-linux-arm64` | Linux ARM64：树莓派 4/5（64 位系统）、瑞芯微 / 晶晨盒子 | 同上 |
+| `cc-dashboard-<版本>-linux-armv7` | Linux ARMv7（32 位）：树莓派 2/3、旧款矿渣 | 同上 |
 | `cc-dashboard_*_amd64.deb` | Debian / Ubuntu（x86_64） | 安装即启动（`apt install ./xxx.deb`） |
 | `cc-dashboard_*_amd64.rpm` | RHEL / CentOS / Fedora / openSUSE（x86_64） | 安装即启动 |
 | `cc-dashboard_*_arm64.deb` / `.rpm` | 上述发行版的 ARM64 机型 | 同上 |
@@ -36,11 +52,11 @@ deb/rpm 需要本机安装 [nfpm](https://goreleaser.com/nfpm/)（`go install gi
 
 | 文件 | 平台 | 说明 |
 |---|---|---|
-| `cc-agent-windows-amd64.exe` | Windows（x86_64） | `cc-agent --install` 交互式注册服务 |
-| `cc-agent-linux-amd64` | Linux x86_64 服务器 / NAS | 见手册 3.2 节 |
-| `cc-agent-linux-arm64` | ARM64（树莓派 4/5 等） | 同上 |
-| `cc-agent-linux-armv7` | ARMv7 32 位（树莓派 2/3） | 同上 |
-| `cc-agent-linux-mipsle` | MIPS 小端：OpenWrt 主流路由器（MT7621 等） | 裸二进制，配合 procd 使用 |
+| `cc-agent-<版本>-windows-amd64.exe` | Windows（x86_64） | `cc-agent --install` 交互式注册服务 |
+| `cc-agent-<版本>-linux-amd64` | Linux x86_64 服务器 / NAS | 见手册 3.2 节 |
+| `cc-agent-<版本>-linux-arm64` | ARM64（树莓派 4/5 等） | 同上 |
+| `cc-agent-<版本>-linux-armv7` | ARMv7 32 位（树莓派 2/3） | 同上 |
+| `cc-agent-<版本>-linux-mipsle` | MIPS 小端：OpenWrt 主流路由器（MT7621 等） | 裸二进制，配合 procd 使用 |
 
 ### OpenWrt 安装包（ipk，推荐路由器使用）
 
@@ -76,7 +92,7 @@ sudo systemctl start cc-agent
 ## 不产生安装包的方式
 
 - **Docker**：见《docs/使用部署手册.md》2.5 节（`server/deploy/`）。
-- **裸二进制直跑**：任选上表对应平台的 `cc-server-*` / `cc-agent-*`，配合 `--install` 注册服务。
+- **裸二进制直跑**：任选上表对应平台的 `cc-dashboard-*` / `cc-agent-*`，配合 `--install` 注册服务。
 - **开发调试**：`cd server && go run ./cmd/master`；前端 `cd web && npm run dev`。
 
 ## 目录约定

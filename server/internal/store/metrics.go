@@ -15,12 +15,12 @@ const (
 	Table1m = "metrics_1m"
 	Table1h = "metrics_1h"
 
-	retain5s = 48 * 3600        // 48 小时
-	retain1m = 35 * 24 * 3600   // 35 天
-	retain1h = 400 * 24 * 3600  // 400 天（覆盖一年视图）
+	retain5s = 48 * 3600       // 48 小时
+	retain1m = 35 * 24 * 3600  // 35 天
+	retain1h = 400 * 24 * 3600 // 400 天（覆盖一年视图）
 )
 
-const metricCols = `ts, cpu, mem_used, mem_total, disk_pct, net_rx, net_tx, load1, uptime, disk_read, disk_write, per_cpu`
+const metricCols = `ts, cpu, mem_used, mem_total, disk_pct, net_rx, net_tx, load1, uptime, disk_read, disk_write, per_cpu, temp_max`
 
 // ResolveRange 将 API 的 range 参数映射为数据表与起始时间。
 // 支持：1h / 24h / 7d / 30d / 180d（半年）/ 365d（一年）。
@@ -58,23 +58,32 @@ func (db *DB) insertSampleAt(nodeID, ts int64, s *model.MetricsSample) error {
 		}
 	}
 	_, err := db.Exec(`INSERT OR REPLACE INTO metrics_5s
-		(node_id, ts, cpu, mem_used, mem_total, disk_pct, net_rx, net_tx, load1, uptime, disk_read, disk_write, per_cpu)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(node_id, ts, cpu, mem_used, mem_total, disk_pct, net_rx, net_tx, load1, uptime, disk_read, disk_write, per_cpu, temp_max)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		nodeID, ts, s.CPU, s.MemUsed, s.MemTotal, s.DiskPct, s.NetRx, s.NetTx, s.Load1, s.Uptime,
-		s.DiskRead, s.DiskWrite, perCPU)
+		s.DiskRead, s.DiskWrite, perCPU, s.TempMax)
 	return err
 }
 
 // LatestSample 单节点最新样本；无数据返回 (nil, nil)。
+// metricCols 不含 node_id，故按入参回填，保证响应里的 node_id 正确。
 func (db *DB) LatestSample(nodeID int64) (*model.MetricsSample, error) {
 	row := db.QueryRow(`SELECT `+metricCols+` FROM metrics_5s WHERE node_id=? ORDER BY ts DESC LIMIT 1`, nodeID)
-	return scanPoint(row)
+	s, err := scanPoint(row)
+	if err != nil || s == nil {
+		return nil, err
+	}
+	s.NodeID = nodeID
+	s.FillMemPct()
+	return s, nil
 }
 
 // LatestAll 所有节点的最新样本，key 为 node_id。
+// 用 GROUP BY 取每个节点的最大 ts 再 JOIN 回原表：避免相关子查询对每行都执行一次。
 func (db *DB) LatestAll() (map[int64]*model.MetricsSample, error) {
-	rows, err := db.Query(`SELECT node_id, `+metricCols+` FROM metrics_5s m
-		WHERE ts = (SELECT MAX(ts) FROM metrics_5s x WHERE x.node_id = m.node_id)`)
+	rows, err := db.Query(`SELECT m.node_id, ` + metricCols + ` FROM metrics_5s m
+		JOIN (SELECT node_id, MAX(ts) AS mts FROM metrics_5s GROUP BY node_id) x
+		  ON m.node_id = x.node_id AND m.ts = x.mts`)
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +95,14 @@ func (db *DB) LatestAll() (map[int64]*model.MetricsSample, error) {
 		var perCPU string
 		if err := rows.Scan(&id, &s.Timestamp, &s.CPU, &s.MemUsed, &s.MemTotal,
 			&s.DiskPct, &s.NetRx, &s.NetTx, &s.Load1, &s.Uptime,
-			&s.DiskRead, &s.DiskWrite, &perCPU); err != nil {
+			&s.DiskRead, &s.DiskWrite, &perCPU, &s.TempMax); err != nil {
 			return nil, err
 		}
 		if perCPU != "" {
 			_ = json.Unmarshal([]byte(perCPU), &s.PerCPU)
 		}
+		s.NodeID = id // 查询列中的 node_id 仅用于分组，需回填到样本
+		s.FillMemPct()
 		out[id] = &s
 	}
 	return out, rows.Err()
@@ -116,9 +127,10 @@ func (db *DB) History(nodeID int64, table string, from, to int64) ([]*model.Hist
 		var p model.HistoryPoint
 		if err := rows.Scan(&p.TS, &p.CPU, &p.MemUsed, &p.MemTotal,
 			&p.DiskPct, &p.NetRx, &p.NetTx, &p.Load1, &p.Uptime,
-			&p.DiskRead, &p.DiskWrite, &p.PerCPU); err != nil {
+			&p.DiskRead, &p.DiskWrite, &p.PerCPU, &p.TempMax); err != nil {
 			return nil, err
 		}
+		p.FillMemPct()
 		out = append(out, &p)
 	}
 	return out, rows.Err()
@@ -141,7 +153,7 @@ func (db *DB) AggregateUp(src, dst string, period, from, to int64) error {
 		return errors.New("invalid aggregate tables")
 	}
 	stmt, err := db.Prepare(`INSERT OR REPLACE INTO ` + dst + `
-		(node_id, ts, cpu, mem_used, mem_total, disk_pct, net_rx, net_tx, load1, uptime, disk_read, disk_write, per_cpu)
+		(node_id, ts, cpu, mem_used, mem_total, disk_pct, net_rx, net_tx, load1, uptime, disk_read, disk_write, per_cpu, temp_max)
 		SELECT node_id, ?, AVG(cpu),
 		       CAST(AVG(mem_used) AS INTEGER), CAST(AVG(mem_total) AS INTEGER),
 		       AVG(disk_pct),
@@ -152,7 +164,8 @@ func (db *DB) AggregateUp(src, dst string, period, from, to int64) error {
 		         SELECT s2.per_cpu FROM ` + src + ` s2
 		         WHERE s2.node_id = m.node_id AND s2.ts >= ? AND s2.ts < ? AND s2.per_cpu != ''
 		         ORDER BY s2.ts LIMIT 1
-		       ), '')
+		       ), ''),
+		       MAX(temp_max)
 		FROM ` + src + ` m WHERE ts>=? AND ts<? GROUP BY node_id`)
 	if err != nil {
 		return err
@@ -166,7 +179,11 @@ func (db *DB) AggregateUp(src, dst string, period, from, to int64) error {
 	return nil
 }
 
-// Cleanup 清理超过保留期的历史数据。
+// Cleanup 清理过期数据：三张指标表 + 已恢复告警 + 节点事件 + 开关机记录。
+// 保留期：历史指标按表；事件类数据统一保留 90 天，避免库无限膨胀。
+const retainEvents = 90 * 24 * 3600
+
+// Cleanup 清理过期数据：三张指标表 + 已恢复告警 + 节点事件 + 开关机记录。
 func (db *DB) Cleanup(now int64) error {
 	for _, c := range []struct {
 		table   string
@@ -175,6 +192,20 @@ func (db *DB) Cleanup(now int64) error {
 		if _, err := db.Exec(`DELETE FROM `+c.table+` WHERE ts < ?`, now-c.keepSec); err != nil {
 			return err
 		}
+	}
+	// 只清理已恢复的告警：仍在 firing 的即使很久也不删（triggered_at 老不代表可丢）
+	if _, err := db.Exec(`DELETE FROM alerts WHERE status='resolved' AND resolved_at>0 AND resolved_at < ?`,
+		now-retainEvents); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM node_events WHERE ts < ?`, now-retainEvents); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM boot_events WHERE ts < ?`, now-retainEvents); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM audit_logs WHERE ts < ?`, now-retainEvents); err != nil {
+		return err
 	}
 	return nil
 }
@@ -192,7 +223,7 @@ func scanPoint(row interface{ Scan(...any) error }) (*model.MetricsSample, error
 	var perCPU string
 	err := row.Scan(&s.Timestamp, &s.CPU, &s.MemUsed, &s.MemTotal,
 		&s.DiskPct, &s.NetRx, &s.NetTx, &s.Load1, &s.Uptime,
-		&s.DiskRead, &s.DiskWrite, &perCPU)
+		&s.DiskRead, &s.DiskWrite, &perCPU, &s.TempMax)
 	if errors.Is(err, errNoRows()) {
 		return nil, nil
 	}

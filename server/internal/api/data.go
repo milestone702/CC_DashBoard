@@ -34,6 +34,21 @@ func (s *Server) handleSummary(c *gin.Context) {
 	})
 }
 
+// rollupThrottled 查询侧补齐降采样窗口，最多每 30 秒执行一次。
+// 后台 rollupLoop 已每 30 秒聚合，这里只为「刚上报的数据立即可见」服务；
+// 若每个查询请求都同步聚合（33 个窗口 × 写盘），单连接下会明显拖慢响应。
+func (s *Server) rollupThrottled(now int64) {
+	if !s.rollupMu.TryLock() {
+		return // 已有协程在聚合，本次直接读（数据最多滞后一个周期）
+	}
+	defer s.rollupMu.Unlock()
+	if now-s.lastRollup < 30 {
+		return
+	}
+	s.lastRollup = now
+	s.db.RollupFresh(now)
+}
+
 // handleHistory 历史时序查询。
 // range 取值：1h | 24h | 7d | 30d | 180d（半年）| 365d（一年），默认 24h。
 // 数据来源：1h→metrics_5s，24h/7d→metrics_1m，30d/180d/365d→metrics_1h。
@@ -49,7 +64,7 @@ func (s *Server) handleHistory(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "unsupported range: use 1h|24h|7d|30d|180d|365d")
 		return
 	}
-	s.db.RollupFresh(now) // 查询前补齐聚合，消除降采样延迟
+	s.rollupThrottled(now) // 查询前补齐聚合，消除降采样延迟（限流，见 rollupThrottled）
 	points, err := s.db.History(n.ID, table, from, now)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())

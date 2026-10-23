@@ -2,6 +2,7 @@ package alert
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,5 +105,58 @@ func TestDelayZeroFiresImmediately(t *testing.T) {
 	e.EvaluateSample(id, &model.MetricsSample{CPU: 99})
 	if firing, _ := db.HasFiring(id, "cpu"); !firing {
 		t.Fatal("delay=0 应立即告警")
+	}
+}
+
+// TestEvaluateSampleConcurrent 并发评估不得 panic / data race。
+// 回归点：breachStart 曾是无锁 map，多个上报协程同时 delete/write 会触发
+// “fatal error: concurrent map writes” 直接终止进程。
+// 用 go test -race 跑本测试才有实际意义。
+func TestEvaluateSampleConcurrent(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	id, err := db.CreateNode(&model.Node{
+		Name: "nc", OSType: model.OSTypeLinux, AccessMode: model.ModeAgent,
+		Token: "tc", Enabled: true, Approved: true, ReportInterval: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DelaySec>0 覆盖 breachStart 写入分支；阈值高低交替覆盖 delete 分支
+	if _, err := db.CreateRule(&model.AlertRule{
+		NodeID: 0, Metric: "cpu", Op: ">", Threshold: 50, DelaySec: 60, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine(db)
+	const workers = 8
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 30; i++ {
+				cpu := 40.0 // 未超阈值 → clearBreach
+				if (i+w)%2 == 0 {
+					cpu = 90 // 超阈值 → breachReached 写 map
+				}
+				e.EvaluateSample(id, &model.MetricsSample{CPU: cpu, MemTotal: 100, MemUsed: int64(cpu)})
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// 并发下同一指标最多一条 firing（依赖 DB 唯一索引兜底）
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM alerts WHERE node_id=? AND metric='cpu' AND status='firing'`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n > 1 {
+		t.Fatalf("并发评估产生了 %d 条 firing 告警，应为 1", n)
 	}
 }

@@ -1,7 +1,8 @@
 // 群晖 Synology DSM Web API 采集（模式 C 变体，os_type=nas + access_mode=api）。
 // 认证：SYNO.API.Auth 登录换取 SID（缓存复用，失效自动重登）
 // 指标：SYNO.Core.System.Utilization（CPU/内存/网络/磁盘 I/O）+ SYNO.Core.System info（uptime/温度/机型）
-//       + SYNO.Core.Network get（主机名 server_name）
+//   - SYNO.Core.Network get（主机名 server_name）
+//
 // 真机校准（2026-10-10，DSM 7.2.2 实测）：
 //   - CPU：user_load/system_load/other_load 为百分比（无 user/system/idle 字段）；1/5/15min_load 为负载均值
 //   - 内存：total_real/avail_real/buffer/cached 为 KB；real_usage 为百分比（含缓存回收口径）
@@ -66,8 +67,8 @@ func synoLogin(client *http.Client, base, account, passwd string) (string, error
 
 // synoUtilization SYNO.Core.System.Utilization 响应（DSM7 真机字段 + DSM6 兼容）。
 type synoUtilization struct {
-	Success bool   `json:"success"`
-	Code    int    `json:"code"`
+	Success bool `json:"success"`
+	Code    int  `json:"code"`
 	Data    struct {
 		CPU struct {
 			// DSM 7：百分比负载 + 负载均值
@@ -105,8 +106,8 @@ type synoUtilization struct {
 			Disk []struct {
 				Device      string  `json:"device"`
 				DisplayName string  `json:"display_name"`
-				ReadByte    float64 `json:"read_byte"`  // B/s
-				WriteByte   float64 `json:"write_byte"` // B/s
+				ReadByte    float64 `json:"read_byte"`    // B/s
+				WriteByte   float64 `json:"write_byte"`   // B/s
 				ReadAccess  float64 `json:"read_access"`  // 次/s
 				WriteAccess float64 `json:"write_access"` // 次/s
 				Utilization float64 `json:"utilization"`  // %
@@ -139,12 +140,12 @@ type synoSystemInfo struct {
 	Success bool `json:"success"`
 	Code    int  `json:"code"`
 	Data    struct {
-		Uptime      string  `json:"up_time"`      // "584:47:0"（时:分:秒）
-		SysTemp     float64 `json:"sys_temp"`     // °C；虚拟机/无传感器为 0
-		Model       string  `json:"model"`        // 如 DS3617xs
-		CPUFamily   string  `json:"cpu_family"`   // 如 Core(TM)
-		CPUSeries   string  `json:"cpu_series"`   // 如 i3-N305
-		CPUCores    string  `json:"cpu_cores"`    // 如 4C/4T
+		Uptime      string  `json:"up_time"`    // "584:47:0"（时:分:秒）
+		SysTemp     float64 `json:"sys_temp"`   // °C；虚拟机/无传感器为 0
+		Model       string  `json:"model"`      // 如 DS3617xs
+		CPUFamily   string  `json:"cpu_family"` // 如 Core(TM)
+		CPUSeries   string  `json:"cpu_series"` // 如 i3-N305
+		CPUCores    string  `json:"cpu_cores"`  // 如 4C/4T
 		CPUClock    int     `json:"cpu_clock_speed"`
 		RAMSize     int     `json:"ram_size"` // MB
 		FirmwareVer string  `json:"firmware_ver"`
@@ -169,8 +170,8 @@ type synoStorage struct {
 	Code    int  `json:"code"`
 	Data    struct {
 		Volumes []struct {
-			ID      string `json:"id"`      // volume_1
-			FsType  string `json:"fs_type"` // ext4
+			ID      string `json:"id"`       // volume_1
+			FsType  string `json:"fs_type"`  // ext4
 			VolPath string `json:"vol_path"` // /volume1
 			Size    struct {
 				Total string `json:"total"` // 字节（字符串）
@@ -212,10 +213,12 @@ func (m *Manager) pullSynology(n *model.Node) {
 	creds, err := m.decryptCreds(n)
 	if err != nil {
 		log.Printf("SYNO[%s] 凭据解密失败: %v", n.Name, err)
+		_ = m.db.SetNodeError(n.ID, fmt.Sprintf("凭据解密失败: %v", err))
 		return
 	}
 	if creds.Username == "" {
 		log.Printf("SYNO[%s] 未配置 DSM 账号", n.Name)
+		_ = m.db.SetNodeError(n.ID, "未配置 DSM 账号")
 		return
 	}
 	port := n.Port
@@ -232,6 +235,7 @@ func (m *Manager) pullSynology(n *model.Node) {
 	sid := m.getSID(n.ID, base, creds.Username, creds.Password)
 	if sid == "" {
 		log.Printf("SYNO[%s] 登录失败", n.Name)
+		_ = m.db.SetNodeError(n.ID, "DSM 登录失败（检查账号密码，且需关闭两步验证）")
 		return
 	}
 	util, err := fetchSynoUtilization(synoHTTPClient, base, sid)
@@ -240,12 +244,14 @@ func (m *Manager) pullSynology(n *model.Node) {
 		sid, err = synoLogin(synoHTTPClient, base, creds.Username, creds.Password)
 		if err != nil || sid == "" {
 			log.Printf("SYNO[%s] 重登失败: %v", n.Name, err)
+			_ = m.db.SetNodeError(n.ID, fmt.Sprintf("DSM 重登失败: %v", err))
 			return
 		}
 		m.setSID(n.ID, sid)
 		util, err = fetchSynoUtilization(synoHTTPClient, base, sid)
 		if err != nil {
 			log.Printf("SYNO[%s] 采集失败: %v", n.Name, err)
+			_ = m.db.SetNodeError(n.ID, fmt.Sprintf("DSM 采集失败: %v", err))
 			return
 		}
 	}
@@ -435,23 +441,23 @@ func synoLive(s *model.MetricsSample, u *synoUtilization, info *synoSystemInfo, 
 	}
 
 	return map[string]any{
-		"ts": now.Unix(),
+		"ts":        now.Unix(),
 		"cpu_total": s.CPU,
-		"per_cpu": []float64{},
-		"load1": s.Load1, "load5": round2(u.Data.CPU.Load5), "load15": round2(u.Data.CPU.Load15),
+		"per_cpu":   []float64{},
+		"load1":     s.Load1, "load5": round2(u.Data.CPU.Load5), "load15": round2(u.Data.CPU.Load15),
 		"mem": map[string]any{
 			"total": s.MemTotal, "used": s.MemUsed, "percent": memPct,
-			"available": int64(u.Data.Memory.AvailReal * 1024),
-			"free":      int64(u.Data.Memory.AvailReal * 1024),
-			"buffers":   int64(u.Data.Memory.Buffer * 1024),
-			"cached":    int64(u.Data.Memory.Cached * 1024),
+			"available":  int64(u.Data.Memory.AvailReal * 1024),
+			"free":       int64(u.Data.Memory.AvailReal * 1024),
+			"buffers":    int64(u.Data.Memory.Buffer * 1024),
+			"cached":     int64(u.Data.Memory.Cached * 1024),
 			"swap_total": int64(u.Data.Memory.TotalSwap * 1024),
 			"swap_used":  int64((u.Data.Memory.TotalSwap - u.Data.Memory.AvailSwap) * 1024),
 		},
 		"nics": nics,
 		"disk_io": map[string]any{
 			"read_bps": s.DiskRead, "write_bps": s.DiskWrite,
-			"read_iops": int64(u.Data.Disk.Total.ReadAccess),
+			"read_iops":  int64(u.Data.Disk.Total.ReadAccess),
 			"write_iops": int64(u.Data.Disk.Total.WriteAccess),
 		},
 		"temps": temps,

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -45,7 +46,31 @@ func (s *Server) handleListNodes(c *gin.Context) {
 		s.attachUpgrade(n)
 		out = append(out, n)
 	}
-	c.JSON(http.StatusOK, gin.H{"nodes": out})
+	// 可选分页：不传 limit 时返回全部（与旧版行为一致）。
+	// 节点多（200+）时客户端可传 ?limit=50&offset=0 分批加载。
+	total := len(out)
+	limit, offset := 0, 0
+	if v, err := strconvParseInt(c.Query("limit")); err == nil && v > 0 {
+		limit = int(v)
+	}
+	if v, err := strconvParseInt(c.Query("offset")); err == nil && v > 0 {
+		offset = int(v)
+	}
+	resp := gin.H{"nodes": out}
+	if limit > 0 {
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		resp["nodes"] = out[offset:end]
+		resp["total"] = total
+		resp["limit"] = limit
+		resp["offset"] = offset
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (s *Server) handleGetNode(c *gin.Context) {
@@ -73,6 +98,7 @@ func (s *Server) handleCreateNode(c *gin.Context) {
 		ReportInterval int    `json:"report_interval"`
 		Enabled        *bool  `json:"enabled"`
 		Direction      string `json:"direction"` // push | pull（模式 A 连接方向）
+		GroupTag       string `json:"group_tag"` // 分组标签（自由文本，空=未分组）
 		// 模式 B（SSH）/ 模式 C（PVE API）凭据：加密存入 auth_enc
 		Username   string `json:"username"`
 		Password   string `json:"password"`
@@ -104,6 +130,7 @@ func (s *Server) handleCreateNode(c *gin.Context) {
 		Approved:       true, // 管理员显式创建 = 已批准
 		Direction:      body.Direction,
 		ReportInterval: body.ReportInterval,
+		GroupTag:       strings.TrimSpace(body.GroupTag),
 		Status:         model.StatusOffline,
 	}
 	if mode == model.ModeSSH || mode == model.ModeAPI {
@@ -165,17 +192,19 @@ func (s *Server) handleUpdateNode(c *gin.Context) {
 		Address        *string `json:"address"`
 		Port           *int    `json:"port"`
 		Enabled        *bool   `json:"enabled"`
-		Approved       *bool   `json:"approved"` // 入网审批：true=批准，false=撤回
+		Approved       *bool   `json:"approved"`  // 入网审批：true=批准，false=撤回
 		Direction      *string `json:"direction"` // push | pull
 		ReportInterval *int    `json:"report_interval"`
 		RotateToken    *bool   `json:"rotate_token"`
+		GroupTag       *string `json:"group_tag"`    // 分组标签（空串=取消分组）
+		MuteMinutes    *int    `json:"mute_minutes"` // 告警静默时长（分钟，0=解除静默）
 		// SSH 凭据：任一非空即整体更新（password 传空串清除）
-		Username   *string `json:"username"`
-		Password   *string `json:"password"`
-		PrivateKey *string `json:"private_key"`
-		NodeName   *string `json:"node_name"`
-		RotateHostKey *bool `json:"rotate_host_key"` // 重置 TOFU 主机指纹
-		PublicIP   *string `json:"public_ip"` // 手动指定公网 IP（SSH/API 模式自动获取的兜底）
+		Username      *string `json:"username"`
+		Password      *string `json:"password"`
+		PrivateKey    *string `json:"private_key"`
+		NodeName      *string `json:"node_name"`
+		RotateHostKey *bool   `json:"rotate_host_key"` // 重置 TOFU 主机指纹
+		PublicIP      *string `json:"public_ip"`       // 手动指定公网 IP（SSH/API 模式自动获取的兜底）
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		fail(c, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -207,6 +236,28 @@ func (s *Server) handleUpdateNode(c *gin.Context) {
 	}
 	if body.ReportInterval != nil && *body.ReportInterval > 0 {
 		n.ReportInterval = *body.ReportInterval
+	}
+	if body.GroupTag != nil {
+		tag := strings.TrimSpace(*body.GroupTag)
+		if r := []rune(tag); len(r) > 24 {
+			tag = string(r[:24]) // 按字符截断，避免多字节被劈开
+		}
+		n.GroupTag = tag
+	}
+	// 告警静默：维护窗口内仍记录告警，但不发通知
+	if body.MuteMinutes != nil {
+		m := *body.MuteMinutes
+		if m < 0 {
+			m = 0
+		}
+		if m > 7*24*60 {
+			m = 7 * 24 * 60 // 最长 7 天，避免误设成永久静默
+		}
+		if m == 0 {
+			n.MuteUntil = 0
+		} else {
+			n.MuteUntil = time.Now().Unix() + int64(m)*60
+		}
 	}
 	if body.Username != nil || body.Password != nil || body.PrivateKey != nil || body.NodeName != nil {
 		creds, err := s.decryptCreds(n)
@@ -275,6 +326,7 @@ func (s *Server) handleDeleteNode(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.engine.Forget(id) // 丢弃内存态计时，避免节点 ID 残留
 	s.hub.Broadcast(gin.H{"type": "node_removed", "node_id": id})
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -322,14 +374,14 @@ func (s *Server) handleNodeDetail(c *gin.Context) {
 	bootEvents, _ := s.db.ListBootEvents(n.ID, 50)
 
 	c.JSON(http.StatusOK, gin.H{
-		"node":     n,
-		"latest":   latest,
-		"live":     json.RawMessage(s.getLive(n.ID)),
-		"detail":   detail,
+		"node":        n,
+		"latest":      latest,
+		"live":        json.RawMessage(s.getLive(n.ID)),
+		"detail":      detail,
 		"boot_events": bootEvents,
-		"hardware": hardware,
-		"events":   events,
-		"alerts":   nodeAlerts,
+		"hardware":    hardware,
+		"events":      events,
+		"alerts":      nodeAlerts,
 	})
 }
 

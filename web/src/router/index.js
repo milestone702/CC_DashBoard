@@ -5,6 +5,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'overview', component: () => import('../views/Overview.vue') },
+    { path: '/alerts', name: 'alerts', component: () => import('../views/Alerts.vue') },
     {
       path: '/device/:id',
       name: 'device',

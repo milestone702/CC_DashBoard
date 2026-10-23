@@ -1,6 +1,9 @@
 # ===== 依赖 =====
 node_modules/
 
+# ===== 介绍 =====
+intro-page/
+
 # ===== 构建产物（全部可由 build.ps1 / vite 重建）=====
 /build/
 /web/node_modules/
@@ -50,3 +53,4 @@ Thumbs.db
 *.syso
 # MiMoCode 项目目录（引擎运行时依赖 + 未来可能的项目级配置/技能；如需共享 skills 再缩小范围）
 .mimocode/
+.playwright-cli/

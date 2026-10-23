@@ -61,3 +61,10 @@ export function statusDotClass(status) {
 export function statusText(status) {
   return { online: '在线', alert: '告警', offline: '离线' }[status] || status
 }
+
+// 版本号：数据源可能自带前缀（构建注入的是 V0.2.0，池条目也可能是 V 开头），
+// 展示统一成 v0.2.0，避免出现 vV0.2.0 这种双前缀。
+export function fmtVer(v) {
+  const s = String(v ?? '').trim().replace(/^[vV]/, '')
+  return s ? `v${s}` : ''
+}

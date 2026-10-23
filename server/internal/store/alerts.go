@@ -105,17 +105,28 @@ func (db *DB) HasFiring(nodeID int64, metric string) (bool, error) {
 }
 
 // InsertAlert 记录告警触发。
-func (db *DB) InsertAlert(nodeID int64, metric, level string, value float64) error {
-	_, err := db.Exec(`INSERT INTO alerts(node_id, metric, level, value, status, triggered_at, resolved_at)
+// 依赖 (node_id, metric) WHERE status='firing' 的唯一索引（见 migrateFiringUnique）：
+// 并发上报时同一指标只会产生一条 firing 记录，返回 created=false 表示已存在。
+func (db *DB) InsertAlert(nodeID int64, metric, level string, value float64) (bool, error) {
+	res, err := db.Exec(`INSERT OR IGNORE INTO alerts(node_id, metric, level, value, status, triggered_at, resolved_at)
 		VALUES(?,?,?,?,'firing',?,0)`, nodeID, metric, level, value, time.Now().Unix())
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ResolveAlert 将指定节点+指标的 firing 告警置为 resolved。
-func (db *DB) ResolveAlert(nodeID int64, metric string) error {
-	_, err := db.Exec(`UPDATE alerts SET status='resolved', resolved_at=?
+// 返回是否真的变更了记录（无 firing 告警时返回 false）——调用方据此决定是否发「恢复」通知。
+func (db *DB) ResolveAlert(nodeID int64, metric string) (bool, error) {
+	res, err := db.Exec(`UPDATE alerts SET status='resolved', resolved_at=?
 		WHERE node_id=? AND metric=? AND status='firing'`, time.Now().Unix(), nodeID, metric)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ListAlerts 查询告警；status 为空返回全部，limit 默认 100。
