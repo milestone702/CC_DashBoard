@@ -437,7 +437,7 @@ foreach ($j in $spkJobs) {
     $md5 = (Get-FileHash $pkgTgz -Algorithm MD5).Hash.ToLower()
     $info = [IO.File]::ReadAllText($infoPath, [Text.Encoding]::UTF8)
     $info = $info.Replace('{VERSION}', $spkVersion).Replace('{ARCH}', $j.SpkArch).
-        Replace('{CHECKSUM}', $md5).Replace('{PORT}', '8080')
+        Replace('{CHECKSUM}', $md5).Replace('{PORT}', '7676')
     [IO.File]::WriteAllText($infoPath, $info, [Text.UTF8Encoding]::new($false))
     # 组装 .spk（未压缩 tar），成员对齐官方 Package Structure；随后把 scripts/* 补成 0755
     $outName = "$($j.App)-$pkgVersion-$($j.SpkArch).spk"

@@ -10,7 +10,7 @@ get_port() {
     if [ -f "${PKGVAR}/port" ]; then
         cat "${PKGVAR}/port"
     else
-        echo 8080
+        echo 7676
     fi
 }
 

@@ -3,7 +3,7 @@
     "cc-dashboard.main": {
       "title": "CC Dashboard",
       "icon": "images/icon_{0}.png",
-      "type": "iframe",
+      "type": "url",
       "protocol": "http",
       "port": "${wizard_port}",
       "url": "/",
