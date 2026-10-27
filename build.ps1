@@ -1,10 +1,11 @@
 # CC_DashBoard 一键构建脚本
-# 用法: powershell -ExecutionPolicy Bypass -File build.ps1 [-Version V1.0] [-Auto]
+# 用法: powershell -ExecutionPolicy Bypass -File build.ps1 [-Version V1.0] [-Auto] [-Zip]
 param(
     [string]$Version = "",   # 直接指定本次版本号（如 -Version V2.0），跳过交互
-    [switch]$Auto            # 非交互：自动 +0.1（CI / 脚本场景）
+    [switch]$Auto,           # 非交互：自动 +0.1（CI / 脚本场景）
+    [switch]$Zip             # 可选：将各产物文件夹打包成 zip（不加则构建末尾询问，回车=跳过）
 )
-# 产物: build/ 目录（按架构分文件夹的裸二进制 + ipk/deb/rpm + fnos/*.fpk + synology/*.spk）
+# 产物: build/ 目录（按架构分文件夹的裸二进制 + ipk/deb/rpm + fnos/*.fpk + synology/*.spk，可选各文件夹 zip）
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -53,7 +54,7 @@ if ($Version) {
 } elseif ($Auto) {
     $version = $defaultNext
 } else {
-    Write-Host "[0/6] 上次版本: $lastVer"
+    Write-Host "[0/7] 上次版本: $lastVer"
     while ($true) {
         $ans = Read-Host "输入本次版本号（回车 = $defaultNext，次版本 +1；升主版本请输入，如 V2）"
         if (-not $ans) { $version = $defaultNext; break }
@@ -79,7 +80,7 @@ $pkgVersion = $version -replace '^[vV]', ''
 if (($pkgVersion -split '\.').Count -lt 3) { $pkgVersion = "$pkgVersion.0" }
 # goversioninfo 字符串版本同样要求 x.y.z
 $viVer = $pkgVersion
-Write-Host "[0/6] 版本号: $version（上次 $lastVer，打包用 $pkgVersion）"
+Write-Host "[0/7] 版本号: $version（上次 $lastVer，打包用 $pkgVersion）"
 $ldflags = "-s -w -X main.version=$version"
 
 # ---- Windows exe 图标 + 版本信息（goversioninfo 生成 .syso，随 go build 链入 PE 资源）----
@@ -98,19 +99,19 @@ $verGroups = ([regex]::Match($pkgVersion, '^\d+(\.\d+)*')).Value -split '\.'
 $verParts = @(0, 0, 0, 0)
 for ($i = 0; $i -lt [Math]::Min(4, $verGroups.Count); $i++) { $verParts[$i] = [int]$verGroups[$i] }
 
-Write-Host "[1/6] 构建前端..."
+Write-Host "[1/7] 构建前端..."
 Push-Location web
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "前端构建失败" }
 Pop-Location
 
-Write-Host "[2/6] 同步前端产物到 embed 目录..."
+Write-Host "[2/7] 同步前端产物到 embed 目录..."
 Remove-Item "server\internal\webui\dist" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item "web\dist" "server\internal\webui\dist" -Recurse
 # 保留空目录占位：.gitkeep 入库保证 clone 后无前端产物也能编译（embed all:dist）
 New-Item -ItemType File -Force -Path "server\internal\webui\dist\.gitkeep" | Out-Null
 
-Write-Host "[3/6] 构建服务端（单二进制，内嵌前端）..."
+Write-Host "[3/7] 构建服务端（单二进制，内嵌前端）..."
 # 产物按架构分文件夹；fnos/synology 为 NAS 套件目录；.tools（fnpack 缓存）/.stage（暂存）为构建缓存
 $archDirs = @('windows-amd64', 'linux-amd64', 'linux-arm64', 'linux-armv7', 'linux-mipsle')
 foreach ($d in ($archDirs + @('fnos', 'synology', '.tools', '.stage'))) {
@@ -161,7 +162,7 @@ foreach ($t in $serverTargets) {
 }
 Pop-Location
 
-Write-Host "[4/6] 构建 Agent 矩阵..."
+Write-Host "[4/7] 构建 Agent 矩阵..."
 $gvAgent = Get-Goversioninfo
 if ($gvAgent -and (Test-Path $iconIco)) {
     & $gvAgent -64 -o (Join-Path $PSScriptRoot 'agent-go\resource_windows_amd64.syso') `
@@ -193,7 +194,7 @@ foreach ($t in $agentTargets) {
 }
 Pop-Location
 
-Write-Host "[5/6] 打包 Linux（ipk / deb / rpm，可选）..."
+Write-Host "[5/7] 打包 Linux（ipk / deb / rpm，可选）..."
 # 交叉编译环境到此结束：立即重置，否则下面 go run mkipk 会产出 Linux 二进制无法在本机执行
 Remove-Item env:GOOS, env:GOARCH, env:GOARM, env:GOMIPS -ErrorAction SilentlyContinue
 # ipk（OpenWrt）：使用 tools/mkipk 纯 Go 构建（包内含 init.d + postinst，装完自动注册开机自启）
@@ -269,7 +270,7 @@ if (Get-Command nfpm -ErrorAction SilentlyContinue) {
     Write-Host "  提示: 未检测到 nfpm，跳过 deb/rpm（安装: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest）"
 }
 
-Write-Host "[6/6] 打包 NAS 套件（fnOS fpk / 群晖 spk）..."
+Write-Host "[6/7] 打包 NAS 套件（fnOS fpk / 群晖 spk）..."
 
 $icon256 = Join-Path $PSScriptRoot 'packaging\icon-256.png'
 
@@ -451,6 +452,33 @@ foreach ($j in $spkJobs) {
     Set-TarMemberMode -Path $tmpSpk -ExecPrefixes @('scripts/', 'scripts')
     Move-Item $tmpSpk (Join-Path $spkDir $outName) -Force
     Write-Host "  ✓ synology\$outName"
+}
+
+# ---- 可选 [7/7]：将各产物文件夹分别打包成 zip（原文件夹保留）----
+# 默认需要手工确认：构建末尾询问 y/N（回车/非交互 = 跳过）；-Zip 参数可免询问直接打包
+if (-not $Zip -and -not [Console]::IsInputRedirected) {
+    $ans = Read-Host "是否将各产物文件夹分别打包成 zip？(y/N，回车跳过)"
+    if ($ans -match '^[yY]') { $Zip = $true }
+}
+if ($Zip) {
+    Write-Host "[7/7] 打包各产物文件夹为 zip（保留原文件夹）..."
+    $zipDirs = $archDirs + @('fnos', 'synology')
+    foreach ($d in $zipDirs) {
+        $src = Join-Path $PSScriptRoot "build\$d"
+        if (-not (Test-Path $src) -or -not (Get-ChildItem $src -Force -ErrorAction SilentlyContinue)) {
+            Write-Warning "  跳过：build\$d 为空或不存在"
+            continue
+        }
+        $zipPath = Join-Path $PSScriptRoot "build\$d-$pkgVersion.zip"
+        Compress-Archive -Path $src -DestinationPath $zipPath -Force
+        if ($LASTEXITCODE -eq 0 -or (Test-Path $zipPath)) {
+            Write-Host "  ✓ $d-$pkgVersion.zip（$([math]::Round((Get-Item $zipPath).Length / 1MB, 2)) MB）"
+        } else {
+            Write-Warning "  zip 失败: $d"
+        }
+    }
+} else {
+    Write-Host "[7/7] 跳过 zip 打包（可选功能；-Zip 参数或构建末尾输入 y 可启用）"
 }
 
 Remove-Item env:GOOS, env:GOARCH, env:GOARM, env:GOMIPS -ErrorAction SilentlyContinue
