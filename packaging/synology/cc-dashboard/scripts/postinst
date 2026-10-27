@@ -1,0 +1,14 @@
+#!/bin/sh
+PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${SYNOPKG_PKGNAME}/target}"
+PKGVAR="${SYNOPKG_PKGVAR:-/var/packages/${SYNOPKG_PKGNAME}/var}"
+
+mkdir -p "$PKGVAR"
+chmod +x "${PKGDEST}/cc-dashboard" 2>/dev/null
+
+# 写入安装向导端口；升级时无向导值，保留已有配置
+if [ -n "$wizard_port" ]; then
+    echo "$wizard_port" > "${PKGVAR}/port"
+elif [ ! -f "${PKGVAR}/port" ]; then
+    echo 8080 > "${PKGVAR}/port"
+fi
+exit 0

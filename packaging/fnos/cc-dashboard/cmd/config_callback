@@ -1,0 +1,14 @@
+#!/bin/bash
+# 应用设置（wizard/config）修改端口后：写配置并重启服务
+PORT="${wizard_port:-8080}"
+if ! echo "$PORT" | grep -Eq '^[0-9]{1,5}$'; then
+    echo "Invalid port: $PORT" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+fi
+mkdir -p "$TRIM_PKGETC"
+echo "PORT=$PORT" > "${TRIM_PKGETC}/service.env"
+
+CMD_DIR=$(dirname "$0")
+"$CMD_DIR/main" stop
+"$CMD_DIR/main" start
+exit 0

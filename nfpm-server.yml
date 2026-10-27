@@ -10,6 +10,7 @@ section: net
 priority: optional
 license: MIT
 maintainer: "milestone702 <cc-dashboard@local>"
+homepage: "https://github.com/milestone702/"
 description: |
   CC_DashBoard master: web dashboard, collectors (SSH/API), alerting, SQLite storage
 contents:

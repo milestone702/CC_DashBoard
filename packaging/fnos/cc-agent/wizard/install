@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "连接监控面板",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_master",
+        "label": "Master 地址",
+        "initValue": "http://192.168.1.100:8080",
+        "rules": [
+          { "required": true, "message": "请填写面板地址" },
+          { "pattern": "^https?://.+", "message": "需以 http:// 或 https:// 开头" }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_token",
+        "label": "节点 Token（可留空，首次启动自动注册）",
+        "initValue": ""
+      },
+      {
+        "type": "tips",
+        "helpText": "Token 在面板「节点管理 → 添加节点」获取；留空时 Agent 首次启动会自动注册，需在面板批准。"
+      }
+    ]
+  }
+]

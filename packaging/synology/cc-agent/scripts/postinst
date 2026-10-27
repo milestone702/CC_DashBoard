@@ -1,0 +1,21 @@
+#!/bin/sh
+PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${SYNOPKG_PKGNAME}/target}"
+PKGVAR="${SYNOPKG_PKGVAR:-/var/packages/${SYNOPKG_PKGNAME}/var}"
+CFG="${PKGVAR}/cc-agent.config.json"
+
+mkdir -p "$PKGVAR"
+chmod +x "${PKGDEST}/cc-agent" 2>/dev/null
+
+# 安装向导填写了 master 才写配置；升级时无向导值，保留已有配置与 token
+if [ -n "$wizard_master" ] && [ "$SYNOPKG_PKG_STATUS" != "UPGRADE" ]; then
+    cat > "$CFG" <<EOF
+{
+  "master": "${wizard_master}",
+  "token": "${wizard_token:-}",
+  "interval_sec": 5,
+  "mode": "push",
+  "listen": ":9100"
+}
+EOF
+fi
+exit 0

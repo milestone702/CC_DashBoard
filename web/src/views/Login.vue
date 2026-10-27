@@ -61,7 +61,11 @@ const error = ref('')
 const loading = ref(false)
 
 const isSetup = computed(() => !auth.status.admin_set)
-const scope = computed(() => String(route.query.next || '').startsWith('/admin') ? 'admin' : 'view')
+// 后台入口判定：next 为 /admin、/admin/ 或带查询串才算管理员认证，其余走前台访问密码
+const scope = computed(() => {
+  const p = String(route.query.next || '')
+  return p === '/admin' || p.startsWith('/admin/') || p.startsWith('/admin?') ? 'admin' : 'view'
+})
 
 async function submit() {
   error.value = ''
@@ -76,8 +80,10 @@ async function submit() {
     } else {
       await auth.login(password.value, scope.value)
     }
-    const next = String(route.query.next || '/')
-    router.push(next.startsWith('/') ? next : '/')
+    // 认证通过 → 回跳目标页；后台入口兜底回 /admin
+    const next = String(route.query.next || '')
+    const fallback = scope.value === 'admin' ? '/admin' : '/'
+    router.push(next.startsWith('/') ? next : fallback)
   } catch (e) {
     error.value = e.message || '登录失败'
   } finally {
@@ -85,5 +91,14 @@ async function submit() {
   }
 }
 
-onMounted(() => auth.ensureReady())
+onMounted(() => {
+  auth.ensureReady().then(() => {
+    // 已持有对应会话则直接进入目标页（如已登录管理员再访问 /login?next=/admin）
+    const next = String(route.query.next || '')
+    const target = next.startsWith('/') ? next : scope.value === 'admin' ? '/admin' : '/'
+    if (scope.value === 'admin' ? auth.isAdmin : auth.authed) {
+      router.replace(target)
+    }
+  })
+})
 </script>

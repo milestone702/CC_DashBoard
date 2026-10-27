@@ -19,6 +19,7 @@ Architecture: %s
 Section: utils
 Priority: optional
 Maintainer: milestone702
+Homepage: https://github.com/milestone702/
 License: MIT
 Copyright: 2026 milestone702
 Description: CC_DashBoard monitoring agent

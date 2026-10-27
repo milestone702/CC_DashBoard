@@ -1,0 +1,10 @@
+appname      = cc-agent
+version      = {VERSION}
+display_name = CC Agent
+desc         = CC_DashBoard 采集端，向面板上报本机状态
+platform     = {PLATFORM}
+source       = thirdparty
+maintainer         = milestone702
+maintainer_url     = https://github.com/milestone702/
+distributor        = milestone702
+distributor_url    = https://github.com/milestone702/

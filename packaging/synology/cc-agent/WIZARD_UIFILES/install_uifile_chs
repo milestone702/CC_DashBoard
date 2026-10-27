@@ -1,0 +1,37 @@
+[
+  {
+    "step_title": "连接监控面板",
+    "items": [
+      {
+        "type": "textfield",
+        "desc": "面板（Master）地址",
+        "subitems": [
+          {
+            "key": "wizard_master",
+            "desc": "Master 地址",
+            "defaultValue": "http://192.168.1.100:8080",
+            "validator": {
+              "allowBlank": false,
+              "regex": "^https?://.+",
+              "errorText": "需以 http:// 或 https:// 开头"
+            }
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "desc": "节点 Token（可留空，首次启动自动注册）",
+        "subitems": [
+          {
+            "key": "wizard_token",
+            "desc": "节点 Token",
+            "defaultValue": "",
+            "validator": {
+              "allowBlank": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

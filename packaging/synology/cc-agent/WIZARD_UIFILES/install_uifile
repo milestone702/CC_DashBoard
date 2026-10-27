@@ -1,0 +1,37 @@
+[
+  {
+    "step_title": "Connect to Dashboard",
+    "items": [
+      {
+        "type": "textfield",
+        "desc": "Dashboard (master) URL",
+        "subitems": [
+          {
+            "key": "wizard_master",
+            "desc": "Master URL",
+            "defaultValue": "http://192.168.1.100:8080",
+            "validator": {
+              "allowBlank": false,
+              "regex": "^https?://.+",
+              "errorText": "Must start with http:// or https://"
+            }
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "desc": "Node token (leave blank to auto-register on first start)",
+        "subitems": [
+          {
+            "key": "wizard_token",
+            "desc": "Node token",
+            "defaultValue": "",
+            "validator": {
+              "allowBlank": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

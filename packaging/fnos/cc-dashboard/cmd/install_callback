@@ -1,0 +1,10 @@
+#!/bin/bash
+# 将安装向导收集的端口写入持久配置（etc -> @appconf）
+PORT="${wizard_port:-8080}"
+if ! echo "$PORT" | grep -Eq '^[0-9]{1,5}$'; then
+    echo "Invalid port: $PORT" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+fi
+mkdir -p "$TRIM_PKGETC"
+echo "PORT=$PORT" > "${TRIM_PKGETC}/service.env"
+exit 0

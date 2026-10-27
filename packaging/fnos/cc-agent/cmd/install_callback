@@ -1,0 +1,31 @@
+#!/bin/bash
+# 将向导填写的 master/token 写入持久配置；token 留空时由 Agent 首启自动注册补全
+MASTER="${wizard_master:-}"
+if [ -z "$MASTER" ]; then
+    echo "Master address is required" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+fi
+
+CFG="${TRIM_PKGETC}/cc-agent.config.json"
+
+# 配置修改时若未重新填写 token，保留文件中已有的 token（自动注册写回的）
+OLD_TOKEN=""
+if [ -f "$CFG" ]; then
+    OLD_TOKEN=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -n 1)
+fi
+TOKEN="${wizard_token:-}"
+if [ -z "$TOKEN" ]; then
+    TOKEN="$OLD_TOKEN"
+fi
+
+mkdir -p "$TRIM_PKGETC"
+cat > "$CFG" <<EOF
+{
+  "master": "${MASTER}",
+  "token": "${TOKEN}",
+  "interval_sec": 5,
+  "mode": "push",
+  "listen": ":9100"
+}
+EOF
+exit 0

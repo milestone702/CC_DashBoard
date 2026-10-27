@@ -28,7 +28,11 @@
           >
             退出
           </button>
-          <router-link v-else-if="auth.status.admin_set" to="/login" class="text-slate-400 hover:text-slate-200">
+          <router-link
+            v-else-if="auth.status.admin_set && $route.name !== 'login'"
+            :to="{ path: '/login', query: { next: $route.fullPath } }"
+            class="text-slate-400 hover:text-slate-200"
+          >
             登录
           </router-link>
         </div>

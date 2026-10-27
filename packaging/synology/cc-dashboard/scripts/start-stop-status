@@ -1,0 +1,63 @@
+#!/bin/sh
+PKG_BIN="cc-dashboard"
+
+PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${SYNOPKG_PKGNAME}/target}"
+PKGVAR="${SYNOPKG_PKGVAR:-/var/packages/${SYNOPKG_PKGNAME}/var}"
+PIDFILE="${PKGVAR}/service.pid"
+LOGFILE="${PKGVAR}/service.log"
+
+get_port() {
+    if [ -f "${PKGVAR}/port" ]; then
+        cat "${PKGVAR}/port"
+    else
+        echo 8080
+    fi
+}
+
+case "$1" in
+    start)
+        mkdir -p "$PKGVAR" 2>/dev/null
+        if [ -f "$PIDFILE" ]; then
+            oldpid=$(head -n 1 "$PIDFILE" | tr -d '[:space:]')
+            if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+                exit 0
+            fi
+            rm -f "$PIDFILE"
+        fi
+        PORT=$(get_port)
+        "${PKGDEST}/${PKG_BIN}" -addr ":${PORT}" -data "${PKGVAR}/data" >> "$LOGFILE" 2>&1 &
+        echo $! > "$PIDFILE"
+        exit 0
+        ;;
+    stop)
+        if [ -f "$PIDFILE" ]; then
+            pid=$(head -n 1 "$PIDFILE" | tr -d '[:space:]')
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null
+                i=0
+                while kill -0 "$pid" 2>/dev/null && [ $i -lt 10 ]; do
+                    sleep 1
+                    i=$((i + 1))
+                done
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null
+                fi
+            fi
+            rm -f "$PIDFILE"
+        fi
+        exit 0
+        ;;
+    status)
+        if [ -f "$PIDFILE" ]; then
+            pid=$(head -n 1 "$PIDFILE" | tr -d '[:space:]')
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                exit 0
+            fi
+            rm -f "$PIDFILE"
+        fi
+        exit 3
+        ;;
+    *)
+        exit 1
+        ;;
+esac

@@ -1,0 +1,34 @@
+#!/bin/bash
+# 应用设置修改后重写配置并重启（逻辑同 install_callback，保留已有 token）
+MASTER="${wizard_master:-}"
+if [ -z "$MASTER" ]; then
+    echo "Master address is required" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+fi
+
+CFG="${TRIM_PKGETC}/cc-agent.config.json"
+
+OLD_TOKEN=""
+if [ -f "$CFG" ]; then
+    OLD_TOKEN=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -n 1)
+fi
+TOKEN="${wizard_token:-}"
+if [ -z "$TOKEN" ]; then
+    TOKEN="$OLD_TOKEN"
+fi
+
+mkdir -p "$TRIM_PKGETC"
+cat > "$CFG" <<EOF
+{
+  "master": "${MASTER}",
+  "token": "${TOKEN}",
+  "interval_sec": 5,
+  "mode": "push",
+  "listen": ":9100"
+}
+EOF
+
+CMD_DIR=$(dirname "$0")
+"$CMD_DIR/main" stop
+"$CMD_DIR/main" start
+exit 0
